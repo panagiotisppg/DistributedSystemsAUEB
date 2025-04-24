@@ -10,7 +10,7 @@ This document provides instructions on how to compile and run the simple distrib
 
 Your project should look like this:
 ```
-project-root/
+DistributedSystemsAUEB/
   └── src/
     └── com/
       └── fooddelivery/
