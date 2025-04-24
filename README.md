@@ -14,18 +14,18 @@ project-root/
 └── src/
 └── com/
 └── fooddelivery/
-├── common/ # Data structures, Protocol, Utilities
+├── common/ 
 │ ├── GeoUtils.java
 │ ├── Product.java
 │ ├── Protocol.java
 │ └── Store.java
-├── core/ # Master and Worker logic
+├── core/ 
 │ ├── ClientHandler.java
 │ ├── Master.java
 │ └── Worker.java
-└── client/ # CLI applications
-├── DummyClient.java
-└── ManagerClient.java
+└── client/ 
+  ├── DummyClient.java
+  └── ManagerClient.java
 ```
 
 ## 3. Compilation
