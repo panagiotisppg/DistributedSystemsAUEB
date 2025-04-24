@@ -9,7 +9,7 @@ This document provides instructions on how to compile and run the simple distrib
 ## 2. Directory Structure
 
 Your project should look like this:
-
+```
 project-root/
 └── src/
 └── com/
@@ -26,6 +26,7 @@ project-root/
 └── client/ # CLI applications
 ├── DummyClient.java
 └── ManagerClient.java
+```
 
 ## 3. Compilation
 
