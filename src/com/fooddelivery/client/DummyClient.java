@@ -1,467 +1,489 @@
 package com.fooddelivery.core;
 
-import com.fooddelivery.common.Protocol;
+import com.fooddelivery.common.*;
 import java.io.*;
 import java.net.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-// Master Node: Coordinates Workers, handles Client/Manager requests, orchestrates MapReduce.
-// Uses a separate port for receiving asynchronous MAP_RESULTs from workers.
-public class Master {
+// Worker Node: Stores data and executes tasks assigned by the Master.
+public class Worker {
 
-    private final int clientPort;
-    private final int resultPort; // Port for workers to send results back
-    private final List<WorkerConnection> workers = new ArrayList<>();
-    private final Object workersLock = new Object(); // Lock for accessing workers list
+    private final int port;
+    private static final Map<String, Store> storeData = new HashMap<>();
+    private static final Object storeDataLock = new Object();
+    private static String masterHost = "localhost";
+    private static int masterResultPort = -1;
 
-    // Search state tracking needs to be thread-safe for access by ClientHandler and
-    // MapResultHandler
-    private final Map<String, SearchState> activeSearches = new HashMap<>();
-    private final Object searchesLock = new Object(); // Lock for the map
-
-    // --- WorkerConnection Inner Class ---
-    // Handles primary communication (sync requests, async broadcasts) with a worker
-    static class WorkerConnection {
-        final String id;
-        final Socket socket;
-        PrintWriter out;
-        BufferedReader in;
-        volatile boolean active = true;
-        private final Object commsLock = new Object(); // Lock specific to this connection's I/O
-
-        WorkerConnection(String id, Socket socket) throws IOException {
-            this.id = id;
-            this.socket = socket;
-            this.out = new PrintWriter(socket.getOutputStream(), true);
-            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            System.out.println("Master: WorkerConnection created for " + id);
-        }
-
-        // Send fire-and-forget (used for MAP_TASK broadcast)
-        boolean sendMessage(String message) {
-            if (!isActive())
-                return false;
-            synchronized (commsLock) { // Brief lock for atomicity of check and send
-                if (!isActive())
-                    return false;
-                try {
-                    // System.out.println("Master sending async to Worker " + id + ": " +
-                    // message.split("\\|")[0]+"..."); // Verbose
-                    out.println(message);
-                    if (out.checkError()) {
-                        System.err.println("Master: PrintWriter error sending async to worker " + id);
-                        markInactive();
-                        return false;
-                    }
-                    return true;
-                } catch (Exception e) {
-                    System.err
-                            .println("Master: Exception sending async message to worker " + id + ": " + e.getMessage());
-                    markInactive();
-                    return false;
-                }
-            }
-        }
-
-        // Send request AND block waiting for sync response (used for ADD, BUY, RATE
-        // etc.)
-        String sendRequestAndWait(String message, long timeoutMillis) {
-            synchronized (commsLock) { // Ensure exclusive access for sync request/reply
-                if (!isActive()) {
-                    System.err.println("Master: Cannot send sync req to inactive worker " + id);
-                    return null;
-                }
-                System.out.println("Master sending sync to Worker " + id + ": " + message.split("\\|")[0] + "..."); // Log
-                                                                                                                    // command
-                                                                                                                    // only
-                out.println(message);
-                if (out.checkError()) {
-                    System.err.println("Master: PrintWriter error on sync send to worker " + id);
-                    markInactive();
-                    return null;
-                }
-
-                try { // Wait for response
-                    socket.setSoTimeout((int) timeoutMillis);
-                    String response = in.readLine(); // BLOCKING READ
-                    socket.setSoTimeout(0); // Reset timeout
-                    if (response == null) {
-                        System.err.println("Master: Worker " + id + " closed connection on sync req.");
-                        markInactive();
-                        return null;
-                    } // Worker closed connection
-                    System.out.println("Master received sync from Worker " + id + ": "
-                            + response.substring(0, Math.min(100, response.length())) + "...");
-                    return response;
-                } catch (SocketTimeoutException e) {
-                    System.err.println(
-                            "Master: Timeout (" + timeoutMillis + "ms) waiting for sync response from worker " + id);
-                    return null;
-                } catch (IOException e) {
-                    System.err.println(
-                            "Master: IOException reading sync response from worker " + id + ": " + e.getMessage());
-                    markInactive();
-                    return null;
-                } catch (Exception e) {
-                    System.err.println(
-                            "Master: Unexpected error reading sync response from worker " + id + ": " + e.getMessage());
-                    markInactive();
-                    return null;
-                } // Catch other errors
-            } // End synchronized block
-        }
-
-        void close() {
-            if (!active)
-                return;
-            markInactive();
-            System.out.println("Master: Closing connection to worker " + id);
-            try {
-                if (in != null)
-                    in.close();
-            } catch (IOException e) {
-            }
-            try {
-                if (out != null)
-                    out.close();
-            } catch (Exception e) {
-            }
-            try {
-                if (socket != null && !socket.isClosed())
-                    socket.close();
-            } catch (IOException e) {
-            }
-        }
-
-        void markInactive() {
-            this.active = false;
-            /* System.out.println("Master: Marked worker " + id + " as inactive."); */ }
-
-        boolean isActive() {
-            return active && socket != null && socket.isConnected() && !socket.isClosed();
-        }
-    } // End WorkerConnection
-
-    // --- SearchState Inner Class (Handles aggregation and notification) ---
-    static class SearchState {
-        final String mapId;
-        final PrintWriter clientWriter;
-        final int expectedResults;
-        final List<String> results = new ArrayList<>(); // Needs sync
-        volatile int receivedResults = 0; // Needs sync for increment
-        final Object lock = new Object(); // Used for sync and wait/notify
-
-        SearchState(String mapId, PrintWriter clientWriter, int expectedResults) {
-            this.mapId = mapId;
-            this.clientWriter = clientWriter;
-            this.expectedResults = expectedResults;
-        }
-
-        // Add result - synchronized on 'lock'
-        void addResult(String workerResultPayload) {
-            synchronized (lock) {
-                if (workerResultPayload != null && !workerResultPayload.trim().isEmpty()) {
-                    String[] storeJsons = workerResultPayload.split(Protocol.MAP_RESULT_STORE_DELIMITER);
-                    for (String storeJson : storeJsons) {
-                        if (storeJson != null && !storeJson.trim().isEmpty()) {
-                            results.add(storeJson);
-                        }
-                    }
-                }
-                receivedResults++;
-                System.out.println("Search " + mapId + ": Received result " + receivedResults + "/" + expectedResults);
-                // Notify if all expected results are in
-                if (receivedResults >= expectedResults) {
-                    System.out.println("Search " + mapId + ": All results received. Notifying handler.");
-                    lock.notifyAll();
-                }
-            }
-        }
-
-        boolean isComplete() {
-            synchronized (lock) {
-                return receivedResults >= expectedResults;
-            }
-        } // Check completion under lock
-
-        String getFinalResultPayload() {
-            synchronized (lock) {
-                if (results.isEmpty())
-                    return "";
-                return String.join(Protocol.MAP_RESULT_STORE_DELIMITER, results);
-            }
-        } // Access results under lock
-
-        int getResultCount() {
-            synchronized (lock) {
-                return results.size();
-            }
-        } // Access results under lock
-
-        Object getLock() {
-            return lock;
-        } // Return lock for waiting
-
-        public int getReceivedResults() {
-            return receivedResults;
-        } // Volatile read is safe
-    } // End SearchState
-
-    // Master Constructor - Starts result listener
-    public Master(int clientPort, int resultPort, String[] workerAddresses) {
-        this.clientPort = clientPort;
-        this.resultPort = resultPort; // Store result port
-        connectToWorkers(workerAddresses);
-        startResultListener(); // Start the *separate* listener for MAP_RESULT
-        System.out.println("Master initialization complete. Ready to accept clients on " + clientPort + ", results on "
-                + resultPort);
+    public Worker(int port) {
+        this.port = port;
     }
 
-    // connectToWorkers (No sync needed during initialization)
-    private void connectToWorkers(String[] workerAddresses) {
-        System.out.println("Master: Attempting to connect to workers...");
-        for (String address : workerAddresses) {
-            try {
-                String[] parts = address.split(":");
-                if (parts.length != 2)
-                    continue;
-                String host = parts[0];
-                int port = Integer.parseInt(parts[1]);
-                Socket socket = new Socket();
-                socket.connect(new InetSocketAddress(host, port), 5000);
-                WorkerConnection wc = new WorkerConnection(address, socket);
-                workers.add(wc);
-                System.out.println("Master: Successfully connected to worker " + address);
-            } catch (Exception e) {
-                System.err.println("Master: Failed to connect to worker " + address + ": " + e.getMessage());
-            }
-        }
-        if (workers.isEmpty()) {
-            System.err.println("Master: FATAL - No workers connected. Exiting.");
+    // Main method needs to accept Master result port info
+    public static void main(String[] args) {
+        if (args.length != 3) {
+            System.err.println("Usage: java com.fooddelivery.core.Worker <worker-listen-port> <master-host> <master-result-port>");
             System.exit(1);
         }
-        System.out.println("Master: Worker connection phase complete. Connected to " + workers.size() + " workers.");
+        int port = 0;
+        try {
+            port = Integer.parseInt(args[0]);
+            if (port <= 0 || port > 65535)
+                throw new NumberFormatException("Worker port");
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid worker port: " + args[0]);
+            System.exit(1);
+        }
+        masterHost = args[1];
+        try {
+            masterResultPort = Integer.parseInt(args[2]);
+            if (masterResultPort <= 0 || masterResultPort > 65535)
+                throw new NumberFormatException("Master result port");
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid master result port: " + args[2]);
+            System.exit(1);
+        }
+        System.out.println("Worker starting on port " + port + ", results to " + masterHost + ":" + masterResultPort);
+        Worker worker = new Worker(port);
+        worker.start();
     }
 
-    // startServer (For Client connections - No changes needed)
-    public void startServer() {
-        try (ServerSocket serverSocket = new ServerSocket(clientPort)) {
-            System.out.println("Master listening for clients on port " + clientPort);
+    // Starts the worker server socket
+    public void start() {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Worker listening on port " + port);
             while (true) {
-                try {
-                    Socket clientSocket = serverSocket.accept();
-                    System.out.println("Master accepted client connection: " + clientSocket.getRemoteSocketAddress());
-                    new ClientHandler(clientSocket, this).start();
-                } catch (IOException e) {
-                    System.err.println("Master: Error accepting client connection: " + e.getMessage());
-                    if (serverSocket.isClosed()) {
-                        System.err.println("Master Client ServerSocket closed.");
-                        break;
-                    }
-                }
+                Socket masterSocket = serverSocket.accept();
+                System.out.println("Worker accepted connection from Master: " + masterSocket.getRemoteSocketAddress());
+                new MasterHandler(masterSocket, port).start();
             }
         } catch (IOException e) {
-            System.err.println("Master error: Could not listen on client port " + clientPort + ". " + e.getMessage());
+            System.err.println("Worker error: Could not listen on port " + port + ". " + e.getMessage());
             e.printStackTrace();
-        } finally {
-            System.out.println("Master client server shutting down. Closing worker connections.");
-            synchronized (workersLock) {
-                workers.forEach(WorkerConnection::close);
-                workers.clear();
-            }
-            System.out.println("Master client server shutdown complete.");
         }
     }
 
-    // --- NEW: Listener for MAP_RESULT messages from Workers on separate port ---
-    private void startResultListener() {
-        Thread resultThread = new Thread(() -> {
-            ServerSocket resultServerSocket = null; // Declare outside try for finally block
-            try {
-                resultServerSocket = new ServerSocket(resultPort);
-                System.out.println("Master Result Listener started on port " + resultPort);
-                while (!Thread.currentThread().isInterrupted()) { // Check interrupt flag
-                    try {
-                        Socket workerResultSocket = resultServerSocket.accept(); // Wait for worker connection
-                        new MapResultHandler(workerResultSocket, this).start(); // Handle in new thread
-                    } catch (SocketException e) {
-                        if (resultServerSocket != null && resultServerSocket.isClosed()) {
-                            System.out.println("Master Result Listener: Socket closed, exiting.");
-                            break;
-                        } // Exit loop if socket closed
-                        System.err.println(
-                                "Master Result Listener: SocketException accepting connection: " + e.getMessage());
-                    } catch (IOException e) {
-                        System.err.println(
-                                "Master Result Listener: Error accepting worker result connection: " + e.getMessage());
-                    }
-                }
-            } catch (IOException e) {
-                System.err.println("Master Result Listener: CRITICAL - Could not listen on result port " + resultPort
-                        + ". " + e.getMessage());
-            } finally {
-                System.out.println("Master Result Listener stopping.");
-                if (resultServerSocket != null && !resultServerSocket.isClosed()) {
-                    try {
-                        resultServerSocket.close();
-                    } catch (IOException e) {
-                        /* ignore close exception */ }
-                }
-            }
-        }, "MasterResultListener");
-        resultThread.setDaemon(true); // Allow clean exit if main thread ends
-        resultThread.start();
-    }
+    // Inner class: Handles one Master connection
+    private static class MasterHandler extends Thread {
+        private final Socket masterSocket;
+        private PrintWriter out;
+        private BufferedReader in;
+        private final int workerPort;
 
-    // --- NEW: Handler for a single MAP_RESULT submission ---
-    private static class MapResultHandler extends Thread {
-        private final Socket workerResultSocket;
-        private final Master master;
-
-        MapResultHandler(Socket socket, Master masterInstance) {
-            this.workerResultSocket = socket;
-            this.master = masterInstance;
-            setName("MapResultHandler-" + socket.getRemoteSocketAddress());
+        public MasterHandler(Socket socket, int port) {
+            this.masterSocket = socket;
+            this.workerPort = port;
+            setName("MasterHandler-" + workerPort + "-" + socket.getRemoteSocketAddress());
         }
 
         @Override
         public void run() {
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(workerResultSocket.getInputStream()))) {
-                String message = reader.readLine();
-                if (message != null) {
-                    master.processMapResult(message);
-                } // Pass to Master
-                else {
-                    System.err.println("MapResultHandler: Received null message from " + getName());
+            try (PrintWriter writer = new PrintWriter(masterSocket.getOutputStream(), true);
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(masterSocket.getInputStream()))) {
+                out = writer;
+                in = reader;
+                String inputLine;
+                while ((inputLine = in.readLine()) != null) {
+                    System.out.println("Worker-" + workerPort + ": Received: "
+                            + inputLine.substring(0, Math.min(100, inputLine.length())) + "...");
+                    String syncResponse = processMasterRequest(inputLine);
+                    if (syncResponse != null) {
+                        System.out.println("Worker-" + workerPort + ": Sending sync response: "
+                                + syncResponse.substring(0, Math.min(100, syncResponse.length())) + "...");
+                        out.println(syncResponse);
+                    }
                 }
+            } catch (SocketException e) {
+                System.err.println("Worker-" + workerPort + ": Master connection closed/reset: " + e.getMessage());
             } catch (IOException e) {
-                System.err.println(
-                        "MapResultHandler: IOException reading result from " + getName() + ": " + e.getMessage());
+                System.err.println("Worker-" + workerPort + ": IO Error: " + e.getMessage());
             } catch (Exception e) {
                 System.err
-                        .println("MapResultHandler: Error processing result from " + getName() + ": " + e.getMessage());
+                        .println("Worker-" + workerPort + ": Unhandled Exception in MasterHandler: " + e.getMessage());
                 e.printStackTrace();
             } finally {
                 try {
-                    workerResultSocket.close();
+                    if (masterSocket != null && !masterSocket.isClosed())
+                        masterSocket.close();
                 } catch (IOException e) {
                 }
+                System.out.println("Worker-" + workerPort + ": Master handler finished.");
             }
         }
-    }
 
-    // --- NEW: Method to process MAP_RESULT received by MapResultHandler ---
-    // Needs synchronized access to 'activeSearches' map
-    private void processMapResult(String mapResultMessage) {
-        System.out.println("Master processMapResult received: "
-                + mapResultMessage.substring(0, Math.min(100, mapResultMessage.length())) + "...");
-        String[] parts = mapResultMessage.split("\\" + Protocol.DELIMITER, 3);
-        if (parts.length < 2 || !parts[0].equals(Protocol.MAP_RESULT)) {
-            System.err.println("Master: Received malformed MAP_RESULT: " + mapResultMessage);
-            return;
+        // Process request, return sync response string, or null if response is async
+        // (MAP_RESULT)
+        private String processMasterRequest(String request) {
+            String[] parts = request.split("\\" + Protocol.DELIMITER, 2);
+            if (parts.length == 0 || parts[0].isEmpty())
+                return Protocol.ERROR + "|Empty command";
+            String command = parts[0];
+            String payload = (parts.length > 1) ? parts[1] : "";
+            String response = Protocol.ERROR + "|Unknown command";
+            try {
+                switch (command) {
+                    case Protocol.M_ADD_STORE:
+                        response = handleAddStore(payload);
+                        break; // UPDATED Check
+                    case Protocol.M_UPDATE_STOCK:
+                        response = handleUpdateStock(payload);
+                        break;
+                    case Protocol.M_ADD_PRODUCT:
+                        response = handleAddProduct(payload);
+                        break; // Already handles existing
+                    case Protocol.M_REMOVE_PRODUCT:
+                        response = handleRemoveProduct(payload);
+                        break;
+                    case Protocol.MAP_TASK:
+                        handleMapTaskAndSendResult(payload);
+                        response = null;
+                        break;
+                    case Protocol.M_BUY:
+                        response = handleBuy(payload);
+                        break;
+                    case Protocol.M_RATE:
+                        response = handleRate(payload);
+                        break;
+                    case Protocol.M_GET_SALES:
+                        response = handleGetSales(payload);
+                        break;
+                    default:
+                        System.err.println("Worker-" + workerPort + ": Unknown command: " + command);
+                        break;
+                }
+            } catch (Exception e) {
+                response = Protocol.ERROR + "|Worker internal error processing " + command;
+                e.printStackTrace();
+            }
+            return response;
         }
-        String mapId = parts[1];
-        String payload = (parts.length > 2) ? parts[2] : "";
-        SearchState state = getSearchState(mapId); // Uses searchesLock
-        if (state != null) {
-            state.addResult(payload);
-        } // Add result (handles internal sync and notify)
-        else {
-            System.err.println("Master: Received MAP_RESULT for unknown/expired mapId: " + mapId);
-        }
-    }
 
-    // getWorkerForStore - Needs synchronized access to 'workers' list via getter
-    public WorkerConnection getWorkerForStore(String storeName) {
-        if (storeName == null || storeName.trim().isEmpty())
-            return null;
-        List<WorkerConnection> activeWorkersSnapshot = getActiveWorkersSnapshot();
-        if (activeWorkersSnapshot.isEmpty()) {
-            System.err.println("Master: No active workers for store: " + storeName);
-            return null;
-        }
-        int workerIndex = Math.abs(storeName.hashCode()) % activeWorkersSnapshot.size();
-        WorkerConnection chosenWorker = activeWorkersSnapshot.get(workerIndex);
-        return chosenWorker;
-    }
+        // --- Handlers ---
 
-    // getActiveWorkersSnapshot - Public method for ClientHandler, needs sync
-    public List<WorkerConnection> getActiveWorkersSnapshot() {
-        List<WorkerConnection> activeWorkersSnapshot = new ArrayList<>();
-        synchronized (workersLock) {
-            workers.removeIf(wc -> !wc.isActive());
-            activeWorkersSnapshot.addAll(workers);
-        }
-        return activeWorkersSnapshot;
-    }
+        // --- UPDATED handleAddStore: Checks if store already exists ---
+        private String handleAddStore(String jsonPayload) {
+            Store store = Store.fromJson(jsonPayload); // Uses updated parser with debug
+            if (store == null) {
+                return Protocol.GENERIC_NACK + "|Failed to parse Store JSON";
+            }
 
-    // broadcastToWorkers - Needs synchronized access to 'workers' list via getter
-    public int broadcastToWorkers(String message) {
-        int sentCount = 0;
-        List<WorkerConnection> activeWorkersSnapshot = getActiveWorkersSnapshot();
-        for (WorkerConnection wc : activeWorkersSnapshot) {
-            if (wc.sendMessage(message)) {
-                sentCount++;
+            synchronized (storeDataLock) { // SYNC NEEDED for check and potential put
+                if (storeData.containsKey(store.getStoreName())) {
+                    // Store already exists, return NACK
+                    System.out.println(
+                            "Worker-" + workerPort + ": Attempt to add existing store denied: " + store.getStoreName());
+                    return Protocol.GENERIC_NACK + "|Store already exists: " + store.getStoreName();
+                } else {
+                    // Store doesn't exist, calculate price category and add it
+                    synchronized (store.getStoreLock()) { // Lock store to calculate category safely
+                        store.updatePriceCategory();
+                    }
+                    storeData.put(store.getStoreName(), store); // Add to map
+                    System.out.println("Worker-" + workerPort + ": Added new store: " + store.getStoreName()
+                            + " with Price Category: " + store.getPriceCategory());
+                    return Protocol.GENERIC_ACK + "|" + store.getStoreName(); // Acknowledge success
+                }
+            } // Release storeDataLock
+        } // End handleAddStore
+
+        private String handleUpdateStock(String payload) {
+            String[] parts = payload.split("\\|");
+            if (parts.length != 3)
+                return Protocol.GENERIC_NACK + "|Format";
+            String storeName = parts[0], productName = parts[1];
+            int changeAmount;
+            try {
+                changeAmount = Integer.parseInt(parts[2]);
+            } catch (NumberFormatException e) {
+                return Protocol.GENERIC_NACK + "|Amount format";
+            }
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null)
+                return Protocol.GENERIC_NACK + "|Store nf";
+            synchronized (store.getStoreLock()) {
+                Product product = store.findProduct(productName);
+                if (product == null)
+                    return Protocol.GENERIC_NACK + "|Product nf";
+                int newAmount = product.getAvailableAmount() + changeAmount;
+                if (newAmount < 0)
+                    return Protocol.GENERIC_NACK + "|Insufficient stock";
+                product.setAvailableAmount(newAmount);
+                System.out.println("Worker-" + workerPort + ": Stock updated " + productName + "->" + newAmount);
+                return Protocol.GENERIC_ACK + "|" + storeName + "|" + productName + "|" + newAmount;
             }
         }
-        return sentCount;
-    }
 
-    // --- Search State Registration Methods ---
-    // Need synchronized access to 'activeSearches' map
-    public void registerSearch(String mapId, SearchState state) {
-        synchronized (searchesLock) {
-            activeSearches.put(mapId, state);
+        // handleAddProduct: Updates existing or adds new, then updates price category
+        private String handleAddProduct(String payload) {
+            String[] parts = payload.split("\\|", 2);
+            if (parts.length != 2)
+                return Protocol.GENERIC_NACK + "|Format";
+            String storeName = parts[0];
+            String productJson = parts[1];
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null)
+                return Protocol.GENERIC_NACK + "|Store nf";
+            Product newProductData = Product.fromJsonFragment(productJson);
+            if (newProductData == null)
+                return Protocol.GENERIC_NACK + "|Bad prod JSON";
+            synchronized (store.getStoreLock()) {
+                Product existingProduct = store.findProduct(newProductData.getProductName());
+                if (existingProduct != null) {
+                    existingProduct.setProductType(newProductData.getProductType());
+                    existingProduct.setAvailableAmount(newProductData.getAvailableAmount());
+                    existingProduct.setPrice(newProductData.getPrice());
+                    existingProduct.setActive(true);
+                    store.updatePriceCategory();
+                    System.out.println("Worker-" + workerPort + ": Updated/Reactivated product "
+                            + existingProduct.getProductName());
+                } else {
+                    store.addProduct(newProductData);
+                    /* Store.addProduct calls updatePriceCategory */ System.out
+                            .println("Worker-" + workerPort + ": Added new product " + newProductData.getProductName());
+                }
+            }
+            return Protocol.GENERIC_ACK + "|" + storeName + "|" + newProductData.getProductName();
         }
-        System.out.println("Master: Registered search state for mapId: " + mapId);
-    }
 
-    public SearchState getSearchState(String mapId) {
-        synchronized (searchesLock) {
-            return activeSearches.get(mapId);
+        // handleRemoveProduct: Marks inactive, updates price category
+        private String handleRemoveProduct(String payload) {
+            String[] parts = payload.split("\\|");
+            if (parts.length != 2)
+                return Protocol.GENERIC_NACK + "|Format";
+            String storeName = parts[0];
+            String productName = parts[1];
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null)
+                return Protocol.GENERIC_NACK + "|Store nf";
+            boolean markedInactive = false;
+            synchronized (store.getStoreLock()) {
+                markedInactive = store.removeProduct(productName);
+                /* Store.removeProduct calls updatePriceCategory */ }
+            if (markedInactive) {
+                System.out.println(
+                        "Worker-" + workerPort + ": Marked product inactive: " + productName + " in " + storeName);
+                return Protocol.GENERIC_ACK + "|" + storeName + "|" + productName;
+            } else {
+                System.out.println("Worker-" + workerPort + ": Product not found to mark inactive: " + productName);
+                return Protocol.GENERIC_NACK + "|Prod nf remove";
+            }
         }
-    }
 
-    public void removeSearch(String mapId) {
-        SearchState removedState;
-        synchronized (searchesLock) {
-            removedState = activeSearches.remove(mapId);
+        // handleBuy: Checks isActive
+        private String handleBuy(String payload) {
+            String[] parts = payload.split("\\|", 3);
+            if (parts.length != 3)
+                return Protocol.ERROR + "|BUY Format";
+            String buyId = parts[0], storeName = parts[1], productRequests = parts[2];
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null)
+                return Protocol.BUY_FAIL + "|" + buyId + "|Store nf";
+            Map<String, Integer> itemsToBuy = new HashMap<>();
+            String[] productPairs = productRequests.split(",");
+            for (String pair : productPairs) {
+                String[] itemQty = pair.split(":");
+                if (itemQty.length == 2) {
+                    try {
+                        int q = Integer.parseInt(itemQty[1]);
+                        if (q <= 0)
+                            return Protocol.BUY_FAIL + "|" + buyId + "|Bad qty";
+                        itemsToBuy.put(itemQty[0], q);
+                    } catch (NumberFormatException e) {
+                        return Protocol.BUY_FAIL + "|" + buyId + "|Bad qty format";
+                    }
+                } else
+                    return Protocol.BUY_FAIL + "|" + buyId + "|Bad pair format";
+            }
+            if (itemsToBuy.isEmpty())
+                return Protocol.BUY_FAIL + "|" + buyId + "|No valid items specified";
+            synchronized (store.getStoreLock()) {
+                double totalCost = 0;
+                Map<Product, Integer> productsToUpdate = new HashMap<>();
+                for (Map.Entry<String, Integer> entry : itemsToBuy.entrySet()) {
+                    String pName = entry.getKey();
+                    int q = entry.getValue();
+                    Product p = store.findProduct(pName);
+                    if (p == null || !p.isActive()) {
+                        System.out
+                                .println("Worker-" + workerPort + ": Buy failed for " + pName + " - not active/found.");
+                        return Protocol.BUY_FAIL + "|" + buyId + "|Product not available/found: " + pName;
+                    }
+                    if (p.getAvailableAmount() < q) {
+                        System.out.println("Worker-" + workerPort + ": Buy failed for " + pName + " - stock low.");
+                        return Protocol.BUY_FAIL + "|" + buyId + "|Stock low: " + pName;
+                    }
+                    productsToUpdate.put(p, q);
+                    totalCost += p.getPrice() * q;
+                }
+                for (Map.Entry<Product, Integer> entry : productsToUpdate.entrySet()) {
+                    entry.getKey().setAvailableAmount(entry.getKey().getAvailableAmount() - entry.getValue());
+                    entry.getKey().recordSale(entry.getValue());
+                }
+                System.out.println("Worker-" + workerPort + ": Sale OK " + buyId);
+                return Protocol.BUY_SUCCESS + "|" + buyId + "|" + String.format("%.2f", totalCost);
+            }
         }
-        if (removedState != null) {
-            System.out.println("Master: Removed search state for mapId: " + mapId);
-        }
-    }
 
-    // --- Master Main Method (Updated Usage) ---
-    public static void main(String[] args) {
-        if (args.length < 3) {
-            System.err.println("Usage: java com.fooddelivery.core.Master <client-listen-port> <result-listen-port> <worker1-host:port> [worker2-host:port] ...");
-            System.exit(1);
+        // handleRate (No changes needed)
+        private String handleRate(String payload) {
+            String[] parts = payload.split("\\|");
+            if (parts.length != 2)
+                return Protocol.GENERIC_NACK + "|Format";
+            String storeName = parts[0];
+            int rating;
+            try {
+                rating = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException e) {
+                return Protocol.GENERIC_NACK + "|Rating format";
+            }
+            if (rating < 1 || rating > 5)
+                return Protocol.GENERIC_NACK + "|Rating range";
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null)
+                return Protocol.GENERIC_NACK + "|Store nf";
+            double newAverageStars;
+            synchronized (store.getStoreLock()) {
+                store.addRating(rating);
+                newAverageStars = store.getStars();
+            }
+            System.out.println("Worker-" + workerPort + ": Rating updated " + storeName + "->" + newAverageStars);
+            return Protocol.RATE_SUCCESS + "|" + storeName + "|" + String.format("%.1f", newAverageStars);
         }
-        int clientPort = 0, resultPort = 0;
-        try {
-            clientPort = Integer.parseInt(args[0]);
-            if (clientPort <= 0 || clientPort > 65535)
-                throw new NumberFormatException("Client port");
-        } catch (NumberFormatException e) {
-            System.err.println("Invalid client port: " + args[0]);
-            System.exit(1);
+
+        // handleGetSales (No changes needed - already includes all)
+        private String handleGetSales(String payload) {
+            String[] parts = payload.split("\\|");
+            if (parts.length != 2)
+                return Protocol.ERROR + "|Format";
+            String requestId = parts[0];
+            String storeName = parts[1];
+            Store store;
+            synchronized (storeDataLock) {
+                store = storeData.get(storeName);
+            }
+            if (store == null) {
+                return Protocol.SALES_RESULT + "|" + requestId + "|Store nf: " + storeName;
+            }
+            StringBuilder salesData = new StringBuilder();
+            double totalStoreRevenue = 0.0;
+            List<Product> productsCopy = new ArrayList<>();
+            synchronized (store.getStoreLock()) {
+                List<Product> currentProducts = store.getProducts();
+                if (currentProducts != null) {
+                    productsCopy.addAll(currentProducts);
+                }
+            }
+            if (productsCopy.isEmpty()) {
+                salesData.append("No products for store: ").append(storeName);
+            } else {
+                salesData.append("Sales for store: ").append(storeName).append(Protocol.SALES_DATA_SEPARATOR);
+                for (Product product : productsCopy) {
+                    if (product != null) {
+                        salesData.append(String.format("  %s -> Units Sold: %d, Revenue: %.2f EUR (%s)%s",
+                                product.getProductName(), product.getTotalUnitsSold(), product.getTotalRevenue(),
+                                product.isActive() ? "Active" : "Inactive", Protocol.SALES_DATA_SEPARATOR));
+                        totalStoreRevenue += product.getTotalRevenue();
+                    }
+                }
+                salesData.append(String.format("Total Store Revenue (All Products): %.2f EUR", totalStoreRevenue));
+            }
+            return Protocol.SALES_RESULT + "|" + requestId + "|" + salesData.toString();
         }
-        try {
-            resultPort = Integer.parseInt(args[1]);
-            if (resultPort <= 0 || resultPort > 65535 || resultPort == clientPort)
-                throw new NumberFormatException("Result port");
-        } catch (NumberFormatException e) {
-            System.err.println("Invalid result port: " + args[1]);
-            System.exit(1);
+
+        // handleMapTask processes AND sends result on new connection
+        private void handleMapTaskAndSendResult(String payload) {
+            String[] parts = payload.split("\\|");
+            if (parts.length < 7) {
+                System.err.println("Worker-" + workerPort + ": Invalid MAP_TASK format");
+                return;
+            }
+            String mapId = parts[0];
+            double userLat = 0, userLon = 0, radius = 0;
+            int minStars = 0;
+            String categoryFilter = parts[4].equals("null") ? null : parts[4];
+            String priceFilter = parts[6].equals("null") ? null : parts[6];
+            try {
+                userLat = Double.parseDouble(parts[1]);
+                userLon = Double.parseDouble(parts[2]);
+                radius = Double.parseDouble(parts[3]);
+                minStars = parts[5].equals("null") ? 0 : Integer.parseInt(parts[5]);
+            } catch (NumberFormatException e) {
+                System.err.println("Worker-" + workerPort + ": Invalid numeric filter in MAP_TASK");
+                return;
+            }
+            List<String> matchingStoresJson = new ArrayList<>();
+            List<Store> storesToCheck = new ArrayList<>();
+            synchronized (storeDataLock) {
+                storesToCheck.addAll(storeData.values());
+            }
+            for (Store store : storesToCheck) {
+                try {
+                    double dist = GeoUtils.haversineDistance(userLat, userLon, store.getLatitude(),
+                            store.getLongitude());
+                    if (dist > radius)
+                        continue;
+                    String sCat = store.getFoodCategory();
+                    double sStars;
+                    String sPriceCategory;
+                    synchronized (store.getStoreLock()) {
+                        sStars = store.getStars();
+                        sPriceCategory = store.getPriceCategory();
+                    }
+                    if (categoryFilter != null && !sCat.equalsIgnoreCase(categoryFilter))
+                        continue;
+                    if (minStars > 0 && sStars < minStars)
+                        continue;
+                    if (priceFilter != null && !sPriceCategory.equals(priceFilter))
+                        continue;
+                    String storeJson;
+                    synchronized (store.getStoreLock()) {
+                        storeJson = store.toJson();
+                    }
+                    matchingStoresJson.add(storeJson);
+                } catch (Exception filterEx) {
+                    System.err.println("Worker-" + workerPort + ": Error filtering " + store.getStoreName() + ": "
+                            + filterEx.getMessage());
+                }
+            }
+            String resultPayload = String.join(Protocol.MAP_RESULT_STORE_DELIMITER, matchingStoresJson);
+            String mapResultMessage = Protocol.MAP_RESULT + "|" + mapId + "|" + resultPayload;
+            System.out.println("Worker-" + workerPort + ": Found " + matchingStoresJson.size() + " stores for mapId "
+                    + mapId + " (active products only)");
+            sendResultToMaster(mapResultMessage);
         }
-        String[] workerAddresses = Arrays.copyOfRange(args, 2, args.length);
-        if (workerAddresses.length == 0) {
-            System.err.println("Need worker addresses");
-            System.exit(1);
+
+        // Helper method to send result on a temporary connection
+        private void sendResultToMaster(String message) {
+            if (masterResultPort == -1) {
+                System.err.println("Worker-" + workerPort + ": Master Result Port invalid.");
+                return;
+            }
+            try (Socket resultSocket = new Socket(masterHost, masterResultPort);
+                    PrintWriter resultWriter = new PrintWriter(resultSocket.getOutputStream(), true)) {
+                System.out.println(
+                        "Worker-" + workerPort + ": Sending MAP_RESULT to " + masterHost + ":" + masterResultPort);
+                resultWriter.println(message);
+            } catch (IOException e) {
+                System.err.println("Worker-" + workerPort + ": Failed to send MAP_RESULT to Master: " + e.getMessage());
+            }
         }
-        Master master = new Master(clientPort, resultPort, workerAddresses);
-        master.startServer(); // Start accepting client connections (main thread blocks here)
-    }
-} // End Master class
+
+    } // End MasterHandler
+} // End Worker
