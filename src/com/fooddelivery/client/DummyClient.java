@@ -298,7 +298,7 @@ public class DummyClient {
     // Main method
     public static void main(String[] args) {
         if (args.length != 2) {
-            System.err.println("Usage: java com.fooddelivery.client.DummyClient <host> <port>");
+            System.err.println("Usage: java com.fooddelivery.client.DummyClient <master-host> <master-client-port>");
             System.exit(1);
         }
         String host = args[0];
