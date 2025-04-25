@@ -3,89 +3,41 @@ package com.fooddelivery.client;
 import com.fooddelivery.common.Protocol;
 import java.io.*;
 import java.net.*;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Paths;
 import java.util.Scanner;
 
-public class DummyClient {
+// Simple Manager CLI Application for administrative tasks.
+public class ManagerClient {
 
     private Socket socket;
     private PrintWriter out;
     private BufferedReader in;
     private final Scanner consoleScanner;
-    private volatile boolean running = true;
-    private Thread listenerThread;
 
-    // --- NEW: Shared object for synchronous responses ---
-    private final Object syncResponseLock = new Object();
-    private String lastSyncResponse = null;
-    // ----------------------------------------------------
-
-    public DummyClient(String masterHost, int masterPort) throws IOException {
+    // Constructor
+    public ManagerClient(String masterHost, int masterPort) throws IOException {
         try {
             this.socket = new Socket();
             this.socket.connect(new InetSocketAddress(masterHost, masterPort), 5000);
             this.out = new PrintWriter(socket.getOutputStream(), true);
             this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             this.consoleScanner = new Scanner(System.in);
-            System.out.println("Dummy Client connected to Master at " + masterHost + ":" + masterPort);
-            startListenerThread(); // Listener reads ALL messages
+            System.out.println("Manager connected to Master at " + masterHost + ":" + masterPort);
         } catch (IOException e) {
-            System.err.println("Dummy Client Error: Could not connect: " + e.getMessage());
+            System.err.println("Manager Error: Could not connect to Master: " + e.getMessage());
             throw e;
         }
     }
 
-    // Listener thread reads ALL messages and dispatches appropriately
-    private void startListenerThread() {
-        listenerThread = new Thread(() -> {
-            try {
-                String messageFromServer;
-                while (running && !Thread.currentThread().isInterrupted()
-                        && (messageFromServer = in.readLine()) != null) {
-                    // --- Dispatch based on message type ---
-                    if (messageFromServer.startsWith(Protocol.SEARCH_RESULT + Protocol.DELIMITER)) {
-                        // Handle async Search Result directly
-                        System.out.println("\n[Search Result]: " + messageFromServer);
-                        System.out.print("Client > "); // Reprint prompt
-                    } else {
-                        // Assume it's a synchronous response (ACK, NACK, BUY_*, RATE_*, ERROR)
-                        synchronized (syncResponseLock) {
-                            System.out.println("\n[Listener Received Sync]: " + messageFromServer); // Debug log
-                            lastSyncResponse = messageFromServer; // Store the response
-                            syncResponseLock.notifyAll(); // Notify the waiting command thread
-                        }
-                        // Don't reprint prompt here, main thread will handle display
-                    }
-                    // ---------------------------------------
-                }
-            } catch (SocketException e) {
-                if (running)
-                    System.err.println("\n[Listener Error]: Connection lost/reset.");
-            } catch (IOException e) {
-                if (running)
-                    System.err.println("\n[Listener Error]: IO Error reading from Master.");
-            } catch (Exception e) {
-                System.err.println("\n[Listener Error]: Unexpected error: " + e.getMessage());
-                e.printStackTrace();
-            } // Catch unexpected
-            finally {
-                System.out.println("\n[Listener thread stopped]");
-                running = false; // Stop main loop if listener dies
-                // Ensure any waiting thread is woken up on error/closure
-                synchronized (syncResponseLock) {
-                    syncResponseLock.notifyAll();
-                }
-            }
-        }, "ClientListenerThread");
-        listenerThread.setDaemon(true);
-        listenerThread.start();
-    }
-
-    // Starts interactive console loop
+    // Starts the interactive console loop.
     public void startConsole() {
         String line;
+        boolean running = true;
         while (running) {
             printMenu();
-            System.out.print("Client > ");
+            System.out.print("Manager > ");
             if (!consoleScanner.hasNextLine()) {
                 System.out.println("Console input closed.");
                 running = false;
@@ -98,207 +50,215 @@ public class DummyClient {
                 running = false;
                 break;
             }
-            handleCommand(line); // Handle command (sends & potentially waits)
+            String response = handleCommand(line); // Process command and get sync response
+            if (response != null) {
+                // Special formatting for multi-line sales results
+                if (response.startsWith(Protocol.SALES_RESULT + "|")) {
+                    displaySalesResult(response);
+                } else {
+                    System.out.println("[Master Response]: " + response);
+                }
+            } else {
+                System.err.println("No response or client-side error.");
+            }
         }
-        closeClient();
+        close();
     }
 
-    // Prints menu
+    // Prints the menu - UPDATED (removed rate)
     private void printMenu() {
         System.out.println(
-                "\n--- Dummy Client Menu ---\n  search <lat> <lon> <radius> <cat|null> <stars|null> <price|null>\n  buy <store> <prod1:q1,prod2:q2>\n  rate <store> <1-5>\n  exit\n-------------------------");
+                "\n--- Manager Menu ---\n  addstore <json_file_path>\n  addproduct <storeName> <prod_json_path>\n  removeproduct <storeName> <productName>\n  updatestock <storeName> <productName> <amount>\n  getsales <storeName>\n  exit\n--------------------");
     }
 
-    // Handles user command input, sends, and waits for SYNC replies
-    private void handleCommand(String line) {
+    // Handles command input, prepares message, sends and waits for reply.
+    private String handleCommand(String line) {
         String[] parts = line.split(" ", 2);
         String command = parts[0].toLowerCase();
         String args = (parts.length > 1) ? parts[1] : "";
         String messageToSend = null;
-        boolean expectSyncResponse = false;
-
         try {
             switch (command) {
-                case "search":
-                    messageToSend = prepareSearchMessage(args);
-                    expectSyncResponse = false;
+                case "addstore":
+                    messageToSend = prepareAddStoreMessage(args);
                     break;
-                case "buy":
-                    messageToSend = prepareBuyMessage(args);
-                    expectSyncResponse = true;
+                case "addproduct":
+                    messageToSend = prepareAddProductMessage(args);
                     break;
-                case "rate":
-                    messageToSend = prepareRateMessage(args);
-                    expectSyncResponse = true;
+                case "removeproduct":
+                    messageToSend = prepareRemoveProductMessage(args);
+                    break;
+                case "updatestock":
+                    messageToSend = prepareUpdateStockMessage(args);
+                    break;
+                // case "rate": messageToSend = prepareRateMessage(args); break; // <-- REMOVED
+                // CASE
+                case "getsales":
+                    messageToSend = prepareGetSalesMessage(args);
                     break;
                 default:
-                    System.out.println("Unknown command.");
-                    return;
+                    System.out.println("Unknown command: " + command);
+                    return "[Client Info]: Unknown command.";
             }
+        } catch (IOException e) {
+            System.err.println("Error reading file: " + e.getMessage());
+            return "[Client Error]: File read error.";
+        } catch (InvalidPathException e) {
+            System.err.println("Invalid file path: " + e.getMessage());
+            return "[Client Error]: Invalid path.";
         } catch (Exception e) {
             System.err.println("Error processing args: " + e.getMessage());
-            return;
+            return "[Client Error]: Invalid arguments.";
         }
 
         if (messageToSend != null) {
-            // --- Clear previous sync response and send ---
-            String response = null;
-            synchronized (syncResponseLock) {
-                lastSyncResponse = null;
-            }
-            if (!sendMessage(messageToSend))
-                return; // Exit if send fails
-            // ---------------------------------------------
-
-            if (expectSyncResponse) {
-                System.out.println("Waiting for synchronous response...");
-                long timeoutMillis = 15000; // 15 second timeout
-                long startTime = System.currentTimeMillis();
-
-                synchronized (syncResponseLock) {
-                    // Wait until listener notifies OR timeout
-                    while (lastSyncResponse == null && (System.currentTimeMillis() - startTime) < timeoutMillis) {
-                        try {
-                            long waitTime = timeoutMillis - (System.currentTimeMillis() - startTime);
-                            if (waitTime <= 0)
-                                break; // Timeout check
-                            syncResponseLock.wait(waitTime); // Wait on the lock
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            System.err.println("[Error]: Interrupted while waiting for response.");
-                            return; // Exit command handling
-                        }
-                    }
-                    // After waiting/notify, check if response arrived
-                    response = lastSyncResponse; // Get response stored by listener
-                } // Release lock
-
-                // --- Process the response (or lack thereof) ---
-                if (response != null) {
-                    System.out.println("[Sync Response]: " + response);
-                } else {
-                    System.err.println("[Error]: Timeout waiting for synchronous response from Master.");
-                    // Should we try to close connection here? Maybe not immediately.
-                }
-                // ----------------------------------------------
-
-            } else {
-                System.out.println("Search request sent. Results will arrive asynchronously via listener.");
-            }
+            return sendMessageAndWait(messageToSend);
+        } else {
+            return "[Client Info]: Command failed validation.";
         }
     }
 
-    // --- Message Preparation Methods (No Changes Needed) ---
-    private String prepareSearchMessage(String args) {
-        String[] parts = args.split(" ");
-        if (parts.length != 6) {
-            System.out.println("Usage: search <lat> <lon> <radius> <cat|null> <stars|null> <price|null>");
+    // --- Message Preparation Methods ---
+    private String prepareAddStoreMessage(String filePath) throws IOException, InvalidPathException {
+        if (filePath.isEmpty()) {
+            System.out.println("Usage: addstore <path>");
             return null;
         }
-        try {
-            Double.parseDouble(parts[0]);
-            Double.parseDouble(parts[1]);
-            Double.parseDouble(parts[2]);
-            if (!parts[4].equals("null"))
-                Integer.parseInt(parts[4]);
-        } catch (NumberFormatException e) {
-            System.err.println("Invalid number format.");
+        String jsonContent = new String(Files.readAllBytes(Paths.get(filePath))).trim().replace("\n", "").replace("\r",
+                "");
+        if (!jsonContent.startsWith("{") || !jsonContent.endsWith("}")) {
+            System.err.println("Error: Not JSON object.");
             return null;
         }
-        String payload = String.join("|", parts);
-        return Protocol.SEARCH + "|" + payload;
+        return Protocol.ADD_STORE + "|" + jsonContent;
     }
 
-    private String prepareBuyMessage(String args) {
+    private String prepareAddProductMessage(String args) throws IOException, InvalidPathException {
         String[] parts = args.split(" ", 2);
         if (parts.length != 2) {
-            System.out.println("Usage: buy <store> <prod1:q1,...>");
+            System.out.println("Usage: addproduct <store> <path>");
             return null;
         }
         String storeName = parts[0];
-        String productList = parts[1];
-        if (storeName.isEmpty() || productList.isEmpty() || !productList.contains(":")) {
-            System.out.println("Invalid format.");
+        String filePath = parts[1];
+        if (storeName.isEmpty() || filePath.isEmpty()) {
+            System.out.println("Names empty.");
             return null;
         }
-        return Protocol.BUY + "|" + storeName + "|" + productList;
+        String productJson = new String(Files.readAllBytes(Paths.get(filePath))).trim().replace("\n", "").replace("\r",
+                "");
+        if (!productJson.startsWith("{") || !productJson.endsWith("}")) {
+            System.err.println("Error: Not JSON object.");
+            return null;
+        }
+        return Protocol.ADD_PRODUCT + "|" + storeName + "|" + productJson;
     }
 
-    private String prepareRateMessage(String args) {
-        String[] parts = args.split(" ");
+    private String prepareRemoveProductMessage(String args) {
+        String[] parts = args.split(" ", 2);
         if (parts.length != 2) {
-            System.out.println("Usage: rate <store> <1-5>");
+            System.out.println("Usage: removeproduct <store> <product>");
             return null;
         }
         String storeName = parts[0];
-        String ratingStr = parts[1];
-        try {
-            int rating = Integer.parseInt(ratingStr);
-            if (rating < 1 || rating > 5) {
-                System.err.println("Rating 1-5.");
-                return null;
-            }
-        } catch (NumberFormatException e) {
-            System.err.println("Rating not integer.");
+        String productName = parts[1];
+        if (storeName.isEmpty() || productName.isEmpty()) {
+            System.out.println("Names empty.");
             return null;
         }
-        if (storeName.isEmpty()) {
-            System.out.println("Name empty.");
-            return null;
-        }
-        return Protocol.RATE + "|" + storeName + "|" + ratingStr;
+        return Protocol.REMOVE_PRODUCT + "|" + storeName + "|" + productName;
     }
 
-    // Sends message to master, returns true on success, false on error
-    private boolean sendMessage(String message) {
-        if (out != null && !socket.isClosed() && running) {
+    private String prepareUpdateStockMessage(String args) {
+        String[] parts = args.split(" ");
+        if (parts.length != 3) {
+            System.out.println("Usage: updatestock <store> <product> <amount>");
+            return null;
+        }
+        String storeName = parts[0];
+        String productName = parts[1];
+        String amountStr = parts[2];
+        try {
+            Integer.parseInt(amountStr);
+        } catch (NumberFormatException e) {
+            System.err.println("Error: Amount not integer.");
+            return null;
+        }
+        if (storeName.isEmpty() || productName.isEmpty()) {
+            System.out.println("Names empty.");
+            return null;
+        }
+        return Protocol.UPDATE_STOCK + "|" + storeName + "|" + productName + "|" + amountStr;
+    }
+
+    // --- prepareRateMessage REMOVED ---
+    // private String prepareRateMessage(String args) { ... }
+    private String prepareGetSalesMessage(String args) {
+        String storeName = args.trim();
+        if (storeName.isEmpty() || storeName.contains(" ")) {
+            System.out.println("Usage: getsales <storeName>");
+            return null;
+        }
+        return Protocol.GET_SALES + Protocol.DELIMITER + storeName;
+    }
+
+    // Sends message and waits for reply.
+    private String sendMessageAndWait(String message) {
+        if (out == null || in == null || socket == null || socket.isClosed())
+            return "[Client Error]: Connection closed.";
+        try {
             System.out.println("Sending to Master: " + message.substring(0, Math.min(100, message.length())) + "...");
             out.println(message);
-            if (out.checkError()) {
-                System.err.println("Error sending message.");
-                running = false;
-                return false;
+            socket.setSoTimeout(10000);
+            String response = in.readLine();
+            socket.setSoTimeout(0);
+            if (response == null) {
+                close();
+                return "[Client Error]: Connection closed by Master.";
             }
-            return true; // Send successful
-        } else {
-            System.err.println("Cannot send. Connection closed?");
-            running = false;
-            return false;
+            return response;
+        } catch (SocketTimeoutException e) {
+            return "[Client Error]: Timeout waiting for Master response.";
+        } catch (IOException e) {
+            close();
+            return "[Client Error]: Communication error.";
         }
     }
 
-    // Closes client resources
-    public void closeClient() {
-        if (!running && listenerThread == null)
+    // Display formatted sales results
+    private void displaySalesResult(String rawResponse) {
+        String[] parts = rawResponse.split("\\|", 3); // SALES_RESULT | requestId | data
+        if (parts.length < 3) {
+            System.out.println("[Master Response Error]: Malformed sales result -> " + rawResponse);
             return;
-        running = false;
-        System.out.println("Closing dummy client.");
+        }
+        String salesData = parts[2];
+        System.out.println("--- Sales Report ---");
+        System.out.println(salesData.replace(Protocol.SALES_DATA_SEPARATOR, "\n")); // Replace separator with newline
+        System.out.println("--------------------");
+    }
+
+    // Closes resources.
+    public void close() {
+        System.out.println("Closing manager client connection.");
         try {
-            if (listenerThread != null)
-                listenerThread.interrupt();
             if (consoleScanner != null)
                 consoleScanner.close();
             if (socket != null && !socket.isClosed())
                 socket.close();
-            if (listenerThread != null)
-                listenerThread.join(500);
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             System.err.println("Error closing: " + e.getMessage());
-            if (e instanceof InterruptedException)
-                Thread.currentThread().interrupt();
         } finally {
             in = null;
             out = null;
             socket = null;
-            listenerThread = null;
-            System.out.println("Dummy Client closed.");
         }
     }
 
-    // Main method
+    // Main method.
     public static void main(String[] args) {
         if (args.length != 2) {
-            System.err.println("Usage: java com.fooddelivery.client.DummyClient <master-host> <master-client-port>");
+            System.err.println("Usage: java com.fooddelivery.client.ManagerClient <master-host> <master-client-port>");
             System.exit(1);
         }
         String host = args[0];
@@ -311,19 +271,19 @@ public class DummyClient {
             System.err.println("Invalid port");
             System.exit(1);
         }
-        DummyClient client = null;
+        ManagerClient manager = null;
         try {
-            client = new DummyClient(host, port);
-            client.startConsole();
+            manager = new ManagerClient(host, port);
+            manager.startConsole();
         } catch (IOException e) {
-            System.err.println("Exiting dummy client due to connection failure.");
+            System.err.println("Exiting manager client due to connection failure.");
         } catch (Exception e) {
             System.err.println("Unexpected error: " + e.getMessage());
             e.printStackTrace();
         } finally {
-            if (client != null && client.running)
-                client.closeClient();
-            System.out.println("Dummy client finished.");
+            if (manager != null && manager.socket != null && !manager.socket.isClosed())
+                manager.close();
+            System.out.println("Manager client finished.");
         }
     }
 }
