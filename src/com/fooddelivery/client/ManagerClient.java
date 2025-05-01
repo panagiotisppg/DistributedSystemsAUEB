@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Paths;
 import java.util.Scanner;
+import java.util.Arrays; // Needed for Arrays.copyOfRange
 
 // Simple Manager CLI Application for administrative tasks.
 public class ManagerClient {
@@ -65,18 +66,19 @@ public class ManagerClient {
         close();
     }
 
-    // Prints the menu - UPDATED (removed rate)
+    // Prints the menu
     private void printMenu() {
         System.out.println(
-                "\n--- Manager Menu ---\n  addstore <json_file_path>\n  addproduct <storeName> <prod_json_path>\n  removeproduct <storeName> <productName>\n  updatestock <storeName> <productName> <amount>\n  getsales <storeName>\n  exit\n--------------------");
+                "\n--- Manager Menu ---\n  addstore <json_file_path>\n  addproduct <Store Name> <prod_json_path>\n  removeproduct <Store Name> <ProductName>\n  updatestock <Store Name> <ProductName> <amount>\n  getsales <Store Name>\n  exit\n--------------------");
     }
 
     // Handles command input, prepares message, sends and waits for reply.
     private String handleCommand(String line) {
-        String[] parts = line.split(" ", 2);
+        String[] parts = line.split(" ", 2); // Split command from the rest
         String command = parts[0].toLowerCase();
         String args = (parts.length > 1) ? parts[1] : "";
         String messageToSend = null;
+
         try {
             switch (command) {
                 case "addstore":
@@ -91,8 +93,6 @@ public class ManagerClient {
                 case "updatestock":
                     messageToSend = prepareUpdateStockMessage(args);
                     break;
-                // case "rate": messageToSend = prepareRateMessage(args); break; // <-- REMOVED
-                // CASE
                 case "getsales":
                     messageToSend = prepareGetSalesMessage(args);
                     break;
@@ -119,6 +119,7 @@ public class ManagerClient {
     }
 
     // --- Message Preparation Methods ---
+
     private String prepareAddStoreMessage(String filePath) throws IOException, InvalidPathException {
         if (filePath.isEmpty()) {
             System.out.println("Usage: addstore <path>");
@@ -133,72 +134,93 @@ public class ManagerClient {
         return Protocol.ADD_STORE + "|" + jsonContent;
     }
 
+    // UPDATED: Handles spaces in store name
     private String prepareAddProductMessage(String args) throws IOException, InvalidPathException {
-        String[] parts = args.split(" ", 2);
-        if (parts.length != 2) {
-            System.out.println("Usage: addproduct <store> <path>");
+        String[] parts = args.split(" ");
+        if (parts.length < 2) {
+            System.out.println("Usage: addproduct <Store Name> <product_json_file_path>");
             return null;
         }
-        String storeName = parts[0];
-        String filePath = parts[1];
+
+        String filePath = parts[parts.length - 1]; // Assume last part is file path
+        // Reconstruct store name (all parts before the last one)
+        String storeName = String.join(" ", Arrays.copyOfRange(parts, 0, parts.length - 1));
+
         if (storeName.isEmpty() || filePath.isEmpty()) {
-            System.out.println("Names empty.");
+            System.out.println("Store name or file path cannot be empty.");
             return null;
         }
+
+        // Read and validate product JSON
         String productJson = new String(Files.readAllBytes(Paths.get(filePath))).trim().replace("\n", "").replace("\r",
                 "");
         if (!productJson.startsWith("{") || !productJson.endsWith("}")) {
-            System.err.println("Error: Not JSON object.");
+            System.err.println("Error: Product file content does not appear to be valid JSON object.");
             return null;
         }
+
         return Protocol.ADD_PRODUCT + "|" + storeName + "|" + productJson;
     }
 
+    // UPDATED: Handles spaces in store name or product name
     private String prepareRemoveProductMessage(String args) {
-        String[] parts = args.split(" ", 2);
-        if (parts.length != 2) {
-            System.out.println("Usage: removeproduct <store> <product>");
+        String[] parts = args.split(" ");
+        if (parts.length < 2) {
+            System.out.println("Usage: removeproduct <Store Name> <ProductName>");
             return null;
         }
-        String storeName = parts[0];
-        String productName = parts[1];
+
+        String productName = parts[parts.length - 1]; // Assume last part is product name
+        // Reconstruct store name (all parts before the last one)
+        String storeName = String.join(" ", Arrays.copyOfRange(parts, 0, parts.length - 1));
+
         if (storeName.isEmpty() || productName.isEmpty()) {
-            System.out.println("Names empty.");
+            System.out.println("Store name and product name cannot be empty.");
             return null;
         }
+
         return Protocol.REMOVE_PRODUCT + "|" + storeName + "|" + productName;
     }
 
+    // UPDATED: Handles spaces in store name or product name
     private String prepareUpdateStockMessage(String args) {
         String[] parts = args.split(" ");
-        if (parts.length != 3) {
-            System.out.println("Usage: updatestock <store> <product> <amount>");
+        if (parts.length < 3) {
+            System.out.println("Usage: updatestock <Store Name> <ProductName> <amount_change>");
             return null;
         }
-        String storeName = parts[0];
-        String productName = parts[1];
-        String amountStr = parts[2];
+
+        String amountStr = parts[parts.length - 1]; // Amount is last
+        String productName = parts[parts.length - 2]; // Product name is second to last
+        // Store name is everything before the product name
+        String storeName = String.join(" ", Arrays.copyOfRange(parts, 0, parts.length - 2));
+
+        // Validate amount is an integer
         try {
             Integer.parseInt(amountStr);
         } catch (NumberFormatException e) {
-            System.err.println("Error: Amount not integer.");
+            System.err.println("Error: Amount change must be a valid integer.");
             return null;
         }
+
         if (storeName.isEmpty() || productName.isEmpty()) {
-            System.out.println("Names empty.");
+            System.out.println("Store name and product name cannot be empty.");
             return null;
         }
+
         return Protocol.UPDATE_STOCK + "|" + storeName + "|" + productName + "|" + amountStr;
     }
 
-    // --- prepareRateMessage REMOVED ---
-    // private String prepareRateMessage(String args) { ... }
+    // prepareRateMessage removed
+
+    // UPDATED: Handles spaces in store name (already correct, takes whole args)
     private String prepareGetSalesMessage(String args) {
-        String storeName = args.trim();
-        if (storeName.isEmpty() || storeName.contains(" ")) {
+        String storeName = args.trim(); // Trim whitespace
+        if (storeName.isEmpty()) { // Check if empty
             System.out.println("Usage: getsales <storeName>");
             return null;
         }
+        // Payload is just the store name
         return Protocol.GET_SALES + Protocol.DELIMITER + storeName;
     }
 
@@ -258,7 +280,7 @@ public class ManagerClient {
     // Main method.
     public static void main(String[] args) {
         if (args.length != 2) {
-            System.err.println("Usage: java com.fooddelivery.client.ManagerClient <host> <port>");
+            System.err.println("Usage: java com.fooddelivery.client.ManagerClient <master-host> <master-client-port>");
             System.exit(1);
         }
         String host = args[0];
