@@ -12,12 +12,18 @@ public class Store {
     private double stars;
     private int noOfVotes;
     private String storeLogo;
-    private List<Product> products; // Contains ACTIVE and INACTIVE products
+    private List<Product> products;
     private final Object storeLock = new Object();
-    // --- NEW: Field to store calculated price category ---
-    private String priceCategory = "N/A"; // Default if no products or not calculated yet
+    private String priceCategory = "N/A";
 
-    private static final boolean PARSER_DEBUG = true;
+    // --- Static flag for verbose logging control ---
+    private static boolean verboseMode = false; // Default to non-verbose
+
+    // --- Static method to set verbose mode (called by Master/Worker main) ---
+    public static void setVerboseMode(boolean verbose) {
+        verboseMode = verbose;
+        System.out.println("Store Verbose Logging: " + (verboseMode ? "ON" : "OFF"));
+    }
 
     public Store(String storeName, double latitude, double longitude, String foodCategory, double stars, int noOfVotes,
             String storeLogo) {
@@ -29,7 +35,6 @@ public class Store {
         this.noOfVotes = noOfVotes;
         this.storeLogo = storeLogo;
         this.products = new ArrayList<>();
-        // Initial calculation is done by the worker after adding
     }
 
     // Getters & Other Methods
@@ -63,34 +68,28 @@ public class Store {
 
     public List<Product> getProducts() {
         return products;
-    } // Returns ALL products
+    }
 
     public Object getStoreLock() {
         return storeLock;
     }
 
-    // --- NEW: Getter for the stored price category ---
-    // This getter should be called within synchronized(storeLock) by the Worker for
-    // consistency
     public String getPriceCategory() {
         return priceCategory;
     }
 
     public void setProducts(List<Product> products) {
         this.products = products;
-    } // Needs external sync
+    }
 
-    // Calculates avg price based on ACTIVE products.
-    // This method itself doesn't need sync if called from within a synchronized
-    // block.
     private double calculateAveragePriceOfActiveProducts() {
-        List<Product> currentProducts = this.products; // Assumes called under lock
+        List<Product> currentProducts = this.products;
         if (currentProducts == null || currentProducts.isEmpty())
             return 0.0;
         double sum = 0;
         int count = 0;
         for (Product p : currentProducts) {
-            if (p != null && p.isActive()) { // Only consider ACTIVE products
+            if (p != null && p.isActive()) {
                 sum += p.getPrice();
                 count++;
             }
@@ -98,12 +97,10 @@ public class Store {
         return (count > 0) ? (sum / count) : 0.0;
     }
 
-    // --- NEW: Updates the stored price category ---
-    // MUST be called inside synchronized(storeLock) block by the Worker.
     public void updatePriceCategory() {
         double avgPrice = calculateAveragePriceOfActiveProducts();
         if (avgPrice <= 0) {
-            this.priceCategory = "N/A"; // Or perhaps "$" if 0 price counts as cheap? Let's use N/A.
+            this.priceCategory = "N/A";
         } else if (avgPrice <= 5.0) {
             this.priceCategory = "$";
         } else if (avgPrice <= 15.0) {
@@ -111,12 +108,11 @@ public class Store {
         } else {
             this.priceCategory = "$$$";
         }
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (Store): Updated price category for " + storeName + " to " + this.priceCategory
+        if (verboseMode)
+            System.out.println("DEBUG (Store " + storeName + "): Updated price category to " + this.priceCategory
                     + " (Avg Price: " + String.format("%.2f", avgPrice) + ")");
     }
 
-    // Adds rating. MUST be called inside synchronized(storeLock) block.
     public void addRating(int ratingValue) {
         if (ratingValue < 1 || ratingValue > 5)
             return;
@@ -125,8 +121,6 @@ public class Store {
         this.stars = (this.noOfVotes > 0) ? ((currentTotalStars + ratingValue) / this.noOfVotes) : ratingValue;
     }
 
-    // Finds product REGARDLESS of active status. Needs external sync if products
-    // list can change.
     public Product findProduct(String productName) {
         List<Product> currentProducts = this.products;
         if (currentProducts == null)
@@ -138,29 +132,24 @@ public class Store {
         return null;
     }
 
-    // Adds product. MUST be called inside synchronized(storeLock) block. Also
-    // update price category.
     public boolean addProduct(Product product) {
         if (product == null)
             return false;
         boolean added = this.products.add(product);
         updatePriceCategory();
         return added;
-    } // Update category after adding
-    // Removes product BY MARKING INACTIVE. MUST be called inside
-    // synchronized(storeLock) block. Also update price category.
+    }
 
     public boolean removeProduct(String productName) {
         Product productToMark = findProduct(productName);
         if (productToMark != null) {
-            productToMark.setActive(false); // Mark as inactive
-            updatePriceCategory(); // Update category after marking inactive
+            productToMark.setActive(false);
+            updatePriceCategory();
             return true;
         }
         return false;
     }
 
-    // toString - Added active count for debugging
     @Override
     public String toString() {
         int productCount = 0;
@@ -179,16 +168,13 @@ public class Store {
                 activeCount);
     }
 
-    // --- UPDATED toJson() ---
-    // Creates a JSON representation of the store, including ONLY ACTIVE products.
-    // Needs external synchronization on storeLock.
     public String toJson() {
         StringBuilder productsJson = new StringBuilder("[");
-        List<Product> currentProducts = this.products; // Assumes called under external lock
+        List<Product> currentProducts = this.products;
         boolean firstProductAdded = false;
         if (currentProducts != null) {
             for (Product p : currentProducts) {
-                if (p != null && p.isActive()) { // Only include ACTIVE products
+                if (p != null && p.isActive()) {
                     if (firstProductAdded) {
                         productsJson.append(",");
                     }
@@ -198,23 +184,20 @@ public class Store {
             }
         }
         productsJson.append("]");
-        // Note: We don't include the calculated priceCategory in the JSON sent to the
-        // client.
         return String.format(
                 "{\"StoreName\":\"%s\",\"Latitude\":%.5f,\"Longitude\":%.5f,\"FoodCategory\":\"%s\",\"Stars\":%.1f,\"NoOfVotes\":%d,\"StoreLogo\":\"%s\",\"Products\":%s}",
                 storeName.replace("\"", "\\\""), latitude, longitude, foodCategory.replace("\"", "\\\""), stars,
                 noOfVotes, storeLogo.replace("\"", "\\\""), productsJson.toString());
     }
 
-    // Parses a JSON string into a Store object. Price category calculated later by
-    // Worker.
+    // Parses a JSON string into a Store object.
     public static Store fromJson(String json) {
         if (json == null || json.trim().isEmpty()) {
             System.err.println("Store.fromJson: Input JSON null or empty.");
             return null;
         }
         json = json.replace("\n", "").replace("\r", "").trim();
-        if (PARSER_DEBUG)
+        if (verboseMode)
             System.out.println("DEBUG (Store.fromJson): Parsing JSON: " + json);
         String name = Product.parseJsonStringValue(json, "StoreName");
         double lat = Product.parseJsonDoubleValue(json, "Latitude");
@@ -225,6 +208,8 @@ public class Store {
         String logo = Product.parseJsonStringValue(json, "StoreLogo");
         if (name == null || category == null || lat == -1.0 || lon == -1.0) {
             System.err.println("Store.fromJson Error: Failed mandatory fields.");
+            if (verboseMode)
+                System.out.println("DEBUG: name=" + name + ", category=" + category + ", lat=" + lat + ", lon=" + lon);
             return null;
         }
         if (stars == -1.0)
@@ -234,13 +219,13 @@ public class Store {
         if (logo == null)
             logo = "";
         Store store = new Store(name, lat, lon, category, stars, votes, logo);
-        if (PARSER_DEBUG)
+        if (verboseMode)
             System.out.println("DEBUG (Store.fromJson): Basic fields parsed.");
         String productsKey = "\"Products\":";
         int productsArrayStartIndex = json.indexOf(productsKey);
         if (productsArrayStartIndex != -1) {
             productsArrayStartIndex += productsKey.length();
-            if (PARSER_DEBUG)
+            if (verboseMode)
                 System.out.println("DEBUG (Store.fromJson): Found 'Products' key.");
             int arrayOpenBracketIndex = -1;
             for (int i = productsArrayStartIndex; i < json.length(); i++) {
@@ -253,7 +238,7 @@ public class Store {
                     break;
             }
             if (arrayOpenBracketIndex != -1) {
-                if (PARSER_DEBUG)
+                if (verboseMode)
                     System.out.println("DEBUG (Store.fromJson): Found '[' at " + arrayOpenBracketIndex);
                 int currentPos = arrayOpenBracketIndex + 1;
                 int braceLevel = 0;
@@ -261,7 +246,7 @@ public class Store {
                 while (currentPos < json.length()) {
                     char currentChar = json.charAt(currentPos);
                     if (currentChar == '{' && braceLevel == 0) {
-                        if (PARSER_DEBUG)
+                        if (verboseMode)
                             System.out.println("DEBUG: Prod start '{' at " + currentPos);
                         productStartIndex = currentPos;
                         braceLevel++;
@@ -271,12 +256,12 @@ public class Store {
                         braceLevel--;
                         if (braceLevel == 0) {
                             String productJsonFragment = json.substring(productStartIndex, currentPos + 1);
-                            if (PARSER_DEBUG)
+                            if (verboseMode)
                                 System.out.println("DEBUG: Extracted prod frag: " + productJsonFragment);
                             Product product = Product.fromJsonFragment(productJsonFragment);
                             if (product != null) {
                                 store.getProducts().add(product);
-                                /* Price category not calculated here */ if (PARSER_DEBUG)
+                                if (verboseMode)
                                     System.out.println("DEBUG: Added product " + product.getProductName());
                             } else {
                                 System.err.println("Store.fromJson: Failed product frag: " + productJsonFragment);
@@ -287,11 +272,11 @@ public class Store {
                             break;
                         }
                     } else if (currentChar == ']' && braceLevel == 0) {
-                        if (PARSER_DEBUG)
+                        if (verboseMode)
                             System.out.println("DEBUG: Found array end ']' at " + currentPos);
                         break;
                     }
-                    currentPos++; // Move this outside the specific char checks
+                    currentPos++;
                 }
                 if (braceLevel != 0) {
                     System.err.println("Store.fromJson Error: Mismatched braces at end.");
@@ -302,7 +287,7 @@ public class Store {
         } else {
             System.out.println("Store.fromJson: 'Products' key not found or array missing.");
         }
-        if (PARSER_DEBUG)
+        if (verboseMode)
             System.out.println("DEBUG (Store.fromJson): Finished parsing.");
         return store;
     }
