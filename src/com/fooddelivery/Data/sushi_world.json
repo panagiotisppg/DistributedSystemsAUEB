@@ -11,13 +11,13 @@
         "ProductName": "salmon nigiri",
         "ProductType": "sushi",
         "AvailableAmount": 50,
-        "Price": 3.2
+        "Price": 30.2
       },
       {
         "ProductName": "miso soup",
         "ProductType": "starter",
         "AvailableAmount": 80,
-        "Price": 2.0
+        "Price": 20.0
       }
     ]
   }
