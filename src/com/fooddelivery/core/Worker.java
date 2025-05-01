@@ -1,12 +1,13 @@
 package com.fooddelivery.core;
 
-import com.fooddelivery.common.*;
+import com.fooddelivery.common.*; // Import the new utility
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
 
 // Worker Node: Stores data and executes tasks assigned by the Master.
 public class Worker {
@@ -16,37 +17,48 @@ public class Worker {
     private static final Object storeDataLock = new Object();
     private static String masterHost = "localhost";
     private static int masterResultPort = -1;
+    private static boolean verboseMode = false; // Worker verbose flag
 
     public Worker(int port) {
         this.port = port;
     }
 
-    // Main method needs to accept Master result port info
+    // UPDATED: Main method to handle -v flag
     public static void main(String[] args) {
-        if (args.length != 3) {
+        List<String> argList = new ArrayList<>(Arrays.asList(args));
+        verboseMode = argList.remove("-v"); // Check and remove -v flag
+
+        // Set verbose mode in common classes if worker is verbose
+        Product.setVerboseMode(verboseMode);
+        Store.setVerboseMode(verboseMode);
+
+        if (argList.size() != 3) {
             System.err.println(
-                    "Usage: java com.fooddelivery.core.Worker <worker-port> <master-host> <master-result-port>");
+                    "Usage: java com.fooddelivery.core.Worker [-v] <worker-port> <master-host> <master-result-port>");
             System.exit(1);
         }
         int port = 0;
         try {
-            port = Integer.parseInt(args[0]);
+            port = Integer.parseInt(argList.get(0));
             if (port <= 0 || port > 65535)
                 throw new NumberFormatException("Worker port");
         } catch (NumberFormatException e) {
-            System.err.println("Invalid worker port: " + args[0]);
+            System.err.println("Invalid worker port: " + argList.get(0));
             System.exit(1);
         }
-        masterHost = args[1];
+        masterHost = argList.get(1);
         try {
-            masterResultPort = Integer.parseInt(args[2]);
+            masterResultPort = Integer.parseInt(argList.get(2));
             if (masterResultPort <= 0 || masterResultPort > 65535)
                 throw new NumberFormatException("Master result port");
         } catch (NumberFormatException e) {
-            System.err.println("Invalid master result port: " + args[2]);
+            System.err.println("Invalid master result port: " + argList.get(2));
             System.exit(1);
         }
-        System.out.println("Worker starting on port " + port + ", results to " + masterHost + ":" + masterResultPort);
+
+        // Use colorful printer for startup message
+        ColorfulStatusPrinter.printInfo("Worker starting on port " + port + ", results to " + masterHost + ":"
+                + masterResultPort + (verboseMode ? " [VERBOSE MODE]" : ""));
         Worker worker = new Worker(port);
         worker.start();
     }
@@ -54,14 +66,19 @@ public class Worker {
     // Starts the worker server socket
     public void start() {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Worker listening on port " + port);
+            ColorfulStatusPrinter.printInfo("Worker listening on port " + port); // Use info color
             while (true) {
                 Socket masterSocket = serverSocket.accept();
-                System.out.println("Worker accepted connection from Master: " + masterSocket.getRemoteSocketAddress());
+                ColorfulStatusPrinter
+                        .printLog("Worker accepted connection from Master: " + masterSocket.getRemoteSocketAddress()); // Use
+                                                                                                                       // log
+                                                                                                                       // color
                 new MasterHandler(masterSocket, port).start();
             }
         } catch (IOException e) {
-            System.err.println("Worker error: Could not listen on port " + port + ". " + e.getMessage());
+            ColorfulStatusPrinter.printError("Worker error: Could not listen on port " + port + ". " + e.getMessage()); // Use
+                                                                                                                        // error
+                                                                                                                        // color
             e.printStackTrace();
         }
     }
@@ -87,22 +104,30 @@ public class Worker {
                 in = reader;
                 String inputLine;
                 while ((inputLine = in.readLine()) != null) {
-                    System.out.println("Worker-" + workerPort + ": Received: "
-                            + inputLine.substring(0, Math.min(100, inputLine.length())) + "...");
+                    // Basic log always shown
+                    ColorfulStatusPrinter
+                            .printLog("Worker-" + workerPort + ": Received Cmd: " + inputLine.split("\\|")[0] + "...");
+                    // Full log only if verbose
+                    ColorfulStatusPrinter.printDebug(verboseMode, "Worker Rcvd Full: " + inputLine);
+
                     String syncResponse = processMasterRequest(inputLine);
                     if (syncResponse != null) {
-                        System.out.println("Worker-" + workerPort + ": Sending sync response: "
-                                + syncResponse.substring(0, Math.min(100, syncResponse.length())) + "...");
+                        // Basic log always shown
+                        ColorfulStatusPrinter.printLog(
+                                "Worker-" + workerPort + ": Sending Resp: " + syncResponse.split("\\|")[0] + "...");
+                        // Full log only if verbose
+                        ColorfulStatusPrinter.printDebug(verboseMode, "Worker Send Full: " + syncResponse);
                         out.println(syncResponse);
                     }
                 }
             } catch (SocketException e) {
-                System.err.println("Worker-" + workerPort + ": Master connection closed/reset: " + e.getMessage());
+                ColorfulStatusPrinter
+                        .printError("Worker-" + workerPort + ": Master connection closed/reset: " + e.getMessage());
             } catch (IOException e) {
-                System.err.println("Worker-" + workerPort + ": IO Error: " + e.getMessage());
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": IO Error: " + e.getMessage());
             } catch (Exception e) {
-                System.err
-                        .println("Worker-" + workerPort + ": Unhandled Exception in MasterHandler: " + e.getMessage());
+                ColorfulStatusPrinter.printError(
+                        "Worker-" + workerPort + ": Unhandled Exception in MasterHandler: " + e.getMessage());
                 e.printStackTrace();
             } finally {
                 try {
@@ -110,7 +135,7 @@ public class Worker {
                         masterSocket.close();
                 } catch (IOException e) {
                 }
-                System.out.println("Worker-" + workerPort + ": Master handler finished.");
+                ColorfulStatusPrinter.printInfo("Worker-" + workerPort + ": Master handler finished for " + getName());
             }
         }
 
@@ -127,13 +152,13 @@ public class Worker {
                 switch (command) {
                     case Protocol.M_ADD_STORE:
                         response = handleAddStore(payload);
-                        break; // UPDATED Check
+                        break;
                     case Protocol.M_UPDATE_STOCK:
                         response = handleUpdateStock(payload);
                         break;
                     case Protocol.M_ADD_PRODUCT:
                         response = handleAddProduct(payload);
-                        break; // Already handles existing
+                        break;
                     case Protocol.M_REMOVE_PRODUCT:
                         response = handleRemoveProduct(payload);
                         break;
@@ -151,7 +176,8 @@ public class Worker {
                         response = handleGetSales(payload);
                         break;
                     default:
-                        System.err.println("Worker-" + workerPort + ": Unknown command: " + command);
+                        ColorfulStatusPrinter
+                                .printError("Worker-" + workerPort + ": Unknown command received: " + command);
                         break;
                 }
             } catch (Exception e) {
@@ -161,80 +187,96 @@ public class Worker {
             return response;
         }
 
-        // --- Handlers ---
-
-        // --- UPDATED handleAddStore: Checks if store already exists ---
+        // --- Handlers with colorful logs ---
         private String handleAddStore(String jsonPayload) {
-            Store store = Store.fromJson(jsonPayload); // Uses updated parser with debug
+            Store store = Store.fromJson(jsonPayload);
             if (store == null) {
-                return Protocol.GENERIC_NACK + "|Failed to parse Store JSON";
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Denied adding existing store: " + store.getStoreName());
+                return Protocol.GENERIC_NACK + "|Store already exists: " + store.getStoreName();
             }
-
-            synchronized (storeDataLock) { // SYNC NEEDED for check and potential put
+            synchronized (storeDataLock) {
                 if (storeData.containsKey(store.getStoreName())) {
-                    // Store already exists, return NACK
-                    System.out.println(
-                            "Worker-" + workerPort + ": Attempt to add existing store denied: " + store.getStoreName());
+                    ColorfulStatusPrinter.printStatus("X",
+                            "Worker-" + workerPort + ": Denied adding existing store: " + store.getStoreName(),
+                            ColorfulStatusPrinter.RED);
                     return Protocol.GENERIC_NACK + "|Store already exists: " + store.getStoreName();
                 } else {
-                    // Store doesn't exist, calculate price category and add it
-                    synchronized (store.getStoreLock()) { // Lock store to calculate category safely
+                    synchronized (store.getStoreLock()) {
                         store.updatePriceCategory();
                     }
-                    storeData.put(store.getStoreName(), store); // Add to map
-                    System.out.println("Worker-" + workerPort + ": Added new store: " + store.getStoreName()
-                            + " with Price Category: " + store.getPriceCategory());
-                    return Protocol.GENERIC_ACK + "|" + store.getStoreName(); // Acknowledge success
+                    storeData.put(store.getStoreName(), store);
+                    ColorfulStatusPrinter
+                            .printStatus("✓",
+                                    "Worker-" + workerPort + ": Added new store: " + store.getStoreName()
+                                            + " (Price Cat: " + store.getPriceCategory() + ")",
+                                    ColorfulStatusPrinter.GREEN);
+                    return Protocol.GENERIC_ACK + "|" + store.getStoreName();
                 }
-            } // Release storeDataLock
-        } // End handleAddStore
+            }
+        }
 
         private String handleUpdateStock(String payload) {
             String[] parts = payload.split("\\|");
-            if (parts.length != 3)
-                return Protocol.GENERIC_NACK + "|Format";
+            if (parts.length != 3){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid format for UPDATE_STOCK payload.");
+                return Protocol.GENERIC_NACK + "|Invalid format";
+            }
             String storeName = parts[0], productName = parts[1];
             int changeAmount;
             try {
                 changeAmount = Integer.parseInt(parts[2]);
             } catch (NumberFormatException e) {
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid amount format for UPDATE_STOCK.");
                 return Protocol.GENERIC_NACK + "|Amount format";
             }
             Store store;
             synchronized (storeDataLock) {
                 store = storeData.get(storeName);
             }
-            if (store == null)
+            if (store == null){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Store not found for UPDATE_STOCK: " + storeName);
                 return Protocol.GENERIC_NACK + "|Store nf";
+            }
             synchronized (store.getStoreLock()) {
                 Product product = store.findProduct(productName);
-                if (product == null)
+                if (product == null){
+                    ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Product not found for UPDATE_STOCK: " + productName);
                     return Protocol.GENERIC_NACK + "|Product nf";
+                }
                 int newAmount = product.getAvailableAmount() + changeAmount;
-                if (newAmount < 0)
+                if (newAmount < 0){
+                    ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Insufficient stock for UPDATE_STOCK on " + productName);
                     return Protocol.GENERIC_NACK + "|Insufficient stock";
+                }
                 product.setAvailableAmount(newAmount);
-                System.out.println("Worker-" + workerPort + ": Stock updated " + productName + "->" + newAmount);
+                ColorfulStatusPrinter.printStatus("✓",
+                        "Worker-" + workerPort + ": Stock updated " + productName + "->" + newAmount,
+                        ColorfulStatusPrinter.GREEN);
                 return Protocol.GENERIC_ACK + "|" + storeName + "|" + productName + "|" + newAmount;
             }
         }
 
-        // handleAddProduct: Updates existing or adds new, then updates price category
         private String handleAddProduct(String payload) {
             String[] parts = payload.split("\\|", 2);
-            if (parts.length != 2)
-                return Protocol.GENERIC_NACK + "|Format";
+            if (parts.length != 2){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid format for ADD_PRODUCT payload.");
+                return Protocol.GENERIC_NACK + "|Invalid format";
+            }
             String storeName = parts[0];
             String productJson = parts[1];
             Store store;
             synchronized (storeDataLock) {
                 store = storeData.get(storeName);
             }
-            if (store == null)
+            if (store == null){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Store not found for ADD_PRODUCT: " + storeName);
                 return Protocol.GENERIC_NACK + "|Store nf";
+            }
             Product newProductData = Product.fromJsonFragment(productJson);
-            if (newProductData == null)
+            if (newProductData == null){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Failed to parse product JSON for ADD_PRODUCT.");
                 return Protocol.GENERIC_NACK + "|Bad prod JSON";
+            }
             synchronized (store.getStoreLock()) {
                 Product existingProduct = store.findProduct(newProductData.getProductName());
                 if (existingProduct != null) {
@@ -243,45 +285,51 @@ public class Worker {
                     existingProduct.setPrice(newProductData.getPrice());
                     existingProduct.setActive(true);
                     store.updatePriceCategory();
-                    System.out.println("Worker-" + workerPort + ": Updated/Reactivated product "
-                            + existingProduct.getProductName());
+                    ColorfulStatusPrinter.printStatus("✓", "Worker-" + workerPort + ": Updated/Reactivated product "
+                            + existingProduct.getProductName(), ColorfulStatusPrinter.GREEN);
                 } else {
                     store.addProduct(newProductData);
-                    /* Store.addProduct calls updatePriceCategory */ System.out
-                            .println("Worker-" + workerPort + ": Added new product " + newProductData.getProductName());
+                    ColorfulStatusPrinter.printStatus("+",
+                            "Worker-" + workerPort + ": Added new product " + newProductData.getProductName(),
+                            ColorfulStatusPrinter.GREEN);
                 }
             }
             return Protocol.GENERIC_ACK + "|" + storeName + "|" + newProductData.getProductName();
         }
 
-        // handleRemoveProduct: Marks inactive, updates price category
         private String handleRemoveProduct(String payload) {
             String[] parts = payload.split("\\|");
-            if (parts.length != 2)
-                return Protocol.GENERIC_NACK + "|Format";
+            if (parts.length != 2){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid format for REMOVE_PRODUCT payload.");
+                return Protocol.GENERIC_NACK + "|Invalid format";
+            }
             String storeName = parts[0];
             String productName = parts[1];
             Store store;
             synchronized (storeDataLock) {
                 store = storeData.get(storeName);
             }
-            if (store == null)
+            if (store == null){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Store not found for REMOVE_PRODUCT: " + storeName);
                 return Protocol.GENERIC_NACK + "|Store nf";
+            }
             boolean markedInactive = false;
             synchronized (store.getStoreLock()) {
                 markedInactive = store.removeProduct(productName);
-                /* Store.removeProduct calls updatePriceCategory */ }
+            }
             if (markedInactive) {
-                System.out.println(
-                        "Worker-" + workerPort + ": Marked product inactive: " + productName + " in " + storeName);
+                ColorfulStatusPrinter.printStatus("-",
+                        "Worker-" + workerPort + ": Marked product inactive: " + productName + " in " + storeName,
+                        ColorfulStatusPrinter.ORANGE);
                 return Protocol.GENERIC_ACK + "|" + storeName + "|" + productName;
             } else {
-                System.out.println("Worker-" + workerPort + ": Product not found to mark inactive: " + productName);
+                ColorfulStatusPrinter.printStatus("?",
+                        "Worker-" + workerPort + ": Product not found to mark inactive: " + productName,
+                        ColorfulStatusPrinter.ORANGE);
                 return Protocol.GENERIC_NACK + "|Prod nf remove";
             }
         }
 
-        // handleBuy: Checks isActive
         private String handleBuy(String payload) {
             String[] parts = payload.split("\\|", 3);
             if (parts.length != 3)
@@ -319,12 +367,13 @@ public class Worker {
                     int q = entry.getValue();
                     Product p = store.findProduct(pName);
                     if (p == null || !p.isActive()) {
-                        System.out
-                                .println("Worker-" + workerPort + ": Buy failed for " + pName + " - not active/found.");
+                        ColorfulStatusPrinter.printError(
+                                "Worker-" + workerPort + ": Buy failed for " + pName + " - not active/found.");
                         return Protocol.BUY_FAIL + "|" + buyId + "|Product not available/found: " + pName;
                     }
                     if (p.getAvailableAmount() < q) {
-                        System.out.println("Worker-" + workerPort + ": Buy failed for " + pName + " - stock low.");
+                        ColorfulStatusPrinter
+                                .printError("Worker-" + workerPort + ": Buy failed for " + pName + " - stock low.");
                         return Protocol.BUY_FAIL + "|" + buyId + "|Stock low: " + pName;
                     }
                     productsToUpdate.put(p, q);
@@ -334,41 +383,48 @@ public class Worker {
                     entry.getKey().setAvailableAmount(entry.getKey().getAvailableAmount() - entry.getValue());
                     entry.getKey().recordSale(entry.getValue());
                 }
-                System.out.println("Worker-" + workerPort + ": Sale OK " + buyId);
+                ColorfulStatusPrinter.printStatus("✓", "Worker-" + workerPort + ": Sale OK " + buyId,
+                        ColorfulStatusPrinter.GREEN);
                 return Protocol.BUY_SUCCESS + "|" + buyId + "|" + String.format("%.2f", totalCost);
             }
         }
 
-        // handleRate (No changes needed)
         private String handleRate(String payload) {
             String[] parts = payload.split("\\|");
-            if (parts.length != 2)
+            if (parts.length != 2){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid format for RATE payload.");
                 return Protocol.GENERIC_NACK + "|Format";
+            }
             String storeName = parts[0];
             int rating;
             try {
                 rating = Integer.parseInt(parts[1]);
             } catch (NumberFormatException e) {
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid rating format for RATE.");
                 return Protocol.GENERIC_NACK + "|Rating format";
             }
-            if (rating < 1 || rating > 5)
+            if (rating < 1 || rating > 5){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Rating out of range for RATE.");
                 return Protocol.GENERIC_NACK + "|Rating range";
+            }
             Store store;
             synchronized (storeDataLock) {
                 store = storeData.get(storeName);
             }
-            if (store == null)
+            if (store == null){
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Store not found for RATE: " + storeName);
                 return Protocol.GENERIC_NACK + "|Store nf";
+            }
             double newAverageStars;
             synchronized (store.getStoreLock()) {
                 store.addRating(rating);
                 newAverageStars = store.getStars();
             }
-            System.out.println("Worker-" + workerPort + ": Rating updated " + storeName + "->" + newAverageStars);
+            ColorfulStatusPrinter
+                    .printInfo("Worker-" + workerPort + ": Rating updated " + storeName + "->" + newAverageStars);
             return Protocol.RATE_SUCCESS + "|" + storeName + "|" + String.format("%.1f", newAverageStars);
         }
 
-        // handleGetSales (No changes needed - already includes all)
         private String handleGetSales(String payload) {
             String[] parts = payload.split("\\|");
             if (parts.length != 2)
@@ -408,11 +464,10 @@ public class Worker {
             return Protocol.SALES_RESULT + "|" + requestId + "|" + salesData.toString();
         }
 
-        // handleMapTask processes AND sends result on new connection
         private void handleMapTaskAndSendResult(String payload) {
             String[] parts = payload.split("\\|");
             if (parts.length < 7) {
-                System.err.println("Worker-" + workerPort + ": Invalid MAP_TASK format");
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid MAP_TASK format");
                 return;
             }
             String mapId = parts[0];
@@ -426,7 +481,7 @@ public class Worker {
                 radius = Double.parseDouble(parts[3]);
                 minStars = parts[5].equals("null") ? 0 : Integer.parseInt(parts[5]);
             } catch (NumberFormatException e) {
-                System.err.println("Worker-" + workerPort + ": Invalid numeric filter in MAP_TASK");
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Invalid numeric filter in MAP_TASK");
                 return;
             }
             List<String> matchingStoresJson = new ArrayList<>();
@@ -459,30 +514,30 @@ public class Worker {
                     }
                     matchingStoresJson.add(storeJson);
                 } catch (Exception filterEx) {
-                    System.err.println("Worker-" + workerPort + ": Error filtering " + store.getStoreName() + ": "
-                            + filterEx.getMessage());
+                    ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Error filtering "
+                            + store.getStoreName() + ": " + filterEx.getMessage());
                 }
             }
             String resultPayload = String.join(Protocol.MAP_RESULT_STORE_DELIMITER, matchingStoresJson);
             String mapResultMessage = Protocol.MAP_RESULT + "|" + mapId + "|" + resultPayload;
-            System.out.println("Worker-" + workerPort + ": Found " + matchingStoresJson.size() + " stores for mapId "
-                    + mapId + " (active products only)");
+            ColorfulStatusPrinter.printInfo(
+                    "Worker-" + workerPort + ": Found " + matchingStoresJson.size() + " stores for mapId " + mapId);
             sendResultToMaster(mapResultMessage);
         }
 
-        // Helper method to send result on a temporary connection
         private void sendResultToMaster(String message) {
             if (masterResultPort == -1) {
-                System.err.println("Worker-" + workerPort + ": Master Result Port invalid.");
+                ColorfulStatusPrinter.printError("Worker-" + workerPort + ": Master Result Port invalid.");
                 return;
             }
             try (Socket resultSocket = new Socket(masterHost, masterResultPort);
                     PrintWriter resultWriter = new PrintWriter(resultSocket.getOutputStream(), true)) {
-                System.out.println(
+                ColorfulStatusPrinter.printDebug(verboseMode,
                         "Worker-" + workerPort + ": Sending MAP_RESULT to " + masterHost + ":" + masterResultPort);
                 resultWriter.println(message);
             } catch (IOException e) {
-                System.err.println("Worker-" + workerPort + ": Failed to send MAP_RESULT to Master: " + e.getMessage());
+                ColorfulStatusPrinter.printError(
+                        "Worker-" + workerPort + ": Failed to send MAP_RESULT to Master: " + e.getMessage());
             }
         }
 
