@@ -3,27 +3,33 @@ package com.fooddelivery.common;
 import java.util.Objects;
 
 public class Product {
+    // ... (Fields remain the same: productName, type, amount, price, sales,
+    // isActive) ...
     private String productName;
     private String productType;
     private int availableAmount;
     private double price;
     private int totalUnitsSold = 0;
     private double totalRevenue = 0.0;
-    // --- NEW: Flag for soft delete ---
-    private boolean isActive = true; // Default to active when created
+    private boolean isActive = true;
 
-    // --- Static flag for debug logging ---
-    private static final boolean PARSER_DEBUG = true; // Set true for detailed parsing logs
+    private static boolean verboseMode = false; // Static flag controlled by Master/Worker
+
+    public static void setVerboseMode(boolean verbose) {
+        verboseMode = verbose;
+        // Use the printer itself for its own status message
+        ColorfulStatusPrinter.printInfo("Product Verbose Logging: " + (verboseMode ? "ON" : "OFF"));
+    }
 
     public Product(String productName, String productType, int availableAmount, double price) {
         this.productName = productName;
         this.productType = productType;
         this.availableAmount = availableAmount;
         this.price = price;
-        this.isActive = true; // Ensure new products are active
+        this.isActive = true;
     }
 
-    // Getters
+    // Getters & Setters (remain the same)
     public String getProductName() {
         return productName;
     }
@@ -50,84 +56,76 @@ public class Product {
 
     public boolean isActive() {
         return isActive;
-    } // Getter for active status
-
-    // Setters - **MUST be called within appropriate synchronized blocks in Worker**
-    public void setAvailableAmount(int availableAmount) {
-        this.availableAmount = availableAmount;
     }
 
-    public void setProductName(String productName) {
-        this.productName = productName;
+    public void setAvailableAmount(int a) {
+        this.availableAmount = a;
     }
 
-    public void setProductType(String productType) {
-        this.productType = productType;
+    public void setProductName(String n) {
+        this.productName = n;
     }
 
-    public void setPrice(double price) {
-        this.price = price;
+    public void setProductType(String t) {
+        this.productType = t;
     }
 
-    public void setActive(boolean active) {
-        isActive = active;
-    } // Setter for active status
+    public void setPrice(double p) {
+        this.price = p;
+    }
 
-    // recordSale - No changes needed
-    public void recordSale(int quantity) {
-        if (quantity > 0) {
-            this.totalUnitsSold += quantity;
-            this.totalRevenue += quantity * this.price;
+    public void setActive(boolean a) {
+        isActive = a;
+    }
+
+    public void recordSale(int q) {
+        if (q > 0) {
+            this.totalUnitsSold += q;
+            this.totalRevenue += q * this.price;
         }
     }
 
-    // toString - Added active status for debugging
     @Override
     public String toString() {
         return "Product{name='" + productName + "', type='" + productType + "', amount=" + availableAmount + ", price="
                 + price + ", active=" + isActive + '}';
     }
 
-    // toJson - No change needed here, filtering happens in Store.toJson
     public String toJson() {
         return String.format("{\"ProductName\":\"%s\",\"ProductType\":\"%s\",\"AvailableAmount\":%d,\"Price\":%.2f}",
                 productName.replace("\"", "\\\""), productType.replace("\"", "\\\""), availableAmount, price);
     }
 
-    // fromJsonFragment - No changes needed (new products default to active)
+    // fromJsonFragment using colorful debug
     public static Product fromJsonFragment(String jsonFragment) {
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (Product.fromJsonFragment): Parsing fragment: " + jsonFragment);
+        ColorfulStatusPrinter.printDebug(verboseMode, "(Product.fromJsonFragment): Parsing fragment: "
+                + jsonFragment.substring(0, Math.min(80, jsonFragment.length())) + "...");
         String name = parseJsonStringValue(jsonFragment, "ProductName");
         String type = parseJsonStringValue(jsonFragment, "ProductType");
         int amount = parseJsonIntValue(jsonFragment, "AvailableAmount");
         double price = parseJsonDoubleValue(jsonFragment, "Price");
 
         if (name != null && type != null && amount != -1 && price != -1.0) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG (Product.fromJsonFragment): Success -> name=" + name + ", type=" + type
-                        + ", amount=" + amount + ", price=" + price);
-            return new Product(name, type, amount, price); // isActive defaults to true
+            ColorfulStatusPrinter.printDebug(verboseMode, "(Product.fromJsonFragment): Success -> name=" + name
+                    + ", type=" + type + ", amount=" + amount + ", price=" + price);
+            return new Product(name, type, amount, price);
         }
-        System.err.println("Error parsing Product fragment (one or more fields failed): " + jsonFragment);
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (Product.fromJsonFragment): FAILED.");
+        // Use printError for actual errors
+        ColorfulStatusPrinter.printError("Parsing Product fragment failed: " + jsonFragment);
+        ColorfulStatusPrinter.printDebug(verboseMode, "(Product.fromJsonFragment): FAILED.");
         return null;
     }
 
-    // --- Helper methods for manual parsing (More robust to whitespace + DEBUG) ---
+    // --- Helper methods with colorful debug ---
 
     public static String parseJsonStringValue(String json, String key) {
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (parseJsonStringValue): Searching for key '" + key + "'");
+        ColorfulStatusPrinter.printDebug(verboseMode, "(parseJsonStringValue): Searching for Str '" + key + "'");
         String keyPattern = "\"" + key + "\"";
         int keyIndex = json.indexOf(keyPattern);
         if (keyIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Key '" + key + "' not found.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Key '" + key + "' not found.");
             return null;
         }
-
         int colonIndex = -1;
         for (int i = keyIndex + keyPattern.length(); i < json.length(); i++) {
             char c = json.charAt(i);
@@ -136,17 +134,15 @@ public class Product {
                 break;
             }
             if (!Character.isWhitespace(c)) {
-                if (PARSER_DEBUG)
-                    System.out.println("DEBUG: Unexpected char '" + c + "' before colon for key '" + key + "'.");
+                ColorfulStatusPrinter.printDebug(verboseMode,
+                        "-> Unexpected char '" + c + "' before colon for '" + key + "'.");
                 return null;
             }
         }
         if (colonIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Colon not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Colon not found for '" + key + "'.");
             return null;
         }
-
         int valueStartIndex = -1;
         for (int i = colonIndex + 1; i < json.length(); i++) {
             char c = json.charAt(i);
@@ -155,41 +151,33 @@ public class Product {
                 break;
             }
             if (!Character.isWhitespace(c)) {
-                if (PARSER_DEBUG)
-                    System.out.println("DEBUG: Unexpected char '" + c + "' before value quote for key '" + key + "'.");
+                ColorfulStatusPrinter.printDebug(verboseMode,
+                        "-> Unexpected char '" + c + "' before value quote for '" + key + "'.");
                 return null;
             }
         }
         if (valueStartIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Opening value quote not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Opening value quote not found for '" + key + "'.");
             return null;
         }
-
         int valueEndIndex = json.indexOf('"', valueStartIndex);
         if (valueEndIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Closing value quote not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Closing value quote not found for '" + key + "'.");
             return null;
         }
-
         String value = json.substring(valueStartIndex, valueEndIndex).replace("\\\"", "\"");
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG: Found value '" + value + "' for key '" + key + "'.");
+        ColorfulStatusPrinter.printDebug(verboseMode, "-> Found Str '" + value + "' for '" + key + "'.");
         return value;
     }
 
     public static int parseJsonIntValue(String json, String key) {
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (parseJsonIntValue): Searching for key '" + key + "'");
+        ColorfulStatusPrinter.printDebug(verboseMode, "(parseJsonIntValue): Searching for Int '" + key + "'");
         String keyPattern = "\"" + key + "\"";
         int keyIndex = json.indexOf(keyPattern);
         if (keyIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Key '" + key + "' not found.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Key '" + key + "' not found.");
             return -1;
         }
-
         int colonIndex = -1;
         for (int i = keyIndex + keyPattern.length(); i < json.length(); i++) {
             char c = json.charAt(i);
@@ -201,11 +189,9 @@ public class Product {
                 return -1;
         }
         if (colonIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Colon not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Colon not found for '" + key + "'.");
             return -1;
         }
-
         int valueStartIndex = -1;
         for (int i = colonIndex + 1; i < json.length(); i++) {
             char c = json.charAt(i);
@@ -215,11 +201,9 @@ public class Product {
             }
         }
         if (valueStartIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Value start not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Value start not found for '" + key + "'.");
             return -1;
         }
-
         int valueEndIndex = -1;
         for (int i = valueStartIndex; i < json.length(); i++) {
             char c = json.charAt(i);
@@ -232,42 +216,33 @@ public class Product {
         if (valueEndIndex == -1) {
             valueEndIndex = json.length();
         }
-
         if (valueStartIndex >= valueEndIndex) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Invalid number range for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Invalid number range for '" + key + "'.");
             return -1;
         }
-
         try {
             String numStr = json.substring(valueStartIndex, valueEndIndex).trim();
             if (numStr.isEmpty() || numStr.equals("-")) {
-                if (PARSER_DEBUG)
-                    System.out.println("DEBUG: Empty number string for key '" + key + "'.");
+                ColorfulStatusPrinter.printDebug(verboseMode, "-> Empty number string for '" + key + "'.");
                 return -1;
             }
             int value = Integer.parseInt(numStr);
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Found value '" + value + "' for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Found Int " + value + " for '" + key + "'.");
             return value;
         } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
-            System.err.println("Error parsing int for key '" + key + "' from substring '"
-                    + json.substring(valueStartIndex, Math.min(valueEndIndex, json.length())) + "': " + e.getMessage());
+            ColorfulStatusPrinter.printError("Parsing int for key '" + key + "' failed: " + e.getMessage());
             return -1;
         }
     }
 
     public static double parseJsonDoubleValue(String json, String key) {
-        if (PARSER_DEBUG)
-            System.out.println("DEBUG (parseJsonDoubleValue): Searching for key '" + key + "'");
+        ColorfulStatusPrinter.printDebug(verboseMode, "(parseJsonDoubleValue): Searching for Dbl '" + key + "'");
         String keyPattern = "\"" + key + "\"";
         int keyIndex = json.indexOf(keyPattern);
         if (keyIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Key '" + key + "' not found.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Key '" + key + "' not found.");
             return -1.0;
         }
-
         int colonIndex = -1;
         for (int i = keyIndex + keyPattern.length(); i < json.length(); i++) {
             char c = json.charAt(i);
@@ -279,11 +254,9 @@ public class Product {
                 return -1.0;
         }
         if (colonIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Colon not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Colon not found for '" + key + "'.");
             return -1.0;
         }
-
         int valueStartIndex = -1;
         for (int i = colonIndex + 1; i < json.length(); i++) {
             char c = json.charAt(i);
@@ -293,11 +266,9 @@ public class Product {
             }
         }
         if (valueStartIndex == -1) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Value start not found for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Value start not found for '" + key + "'.");
             return -1.0;
         }
-
         int valueEndIndex = -1;
         for (int i = valueStartIndex; i < json.length(); i++) {
             char c = json.charAt(i);
@@ -310,27 +281,21 @@ public class Product {
         if (valueEndIndex == -1) {
             valueEndIndex = json.length();
         }
-
         if (valueStartIndex >= valueEndIndex) {
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Invalid number range for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Invalid number range for '" + key + "'.");
             return -1.0;
         }
-
         try {
             String numStr = json.substring(valueStartIndex, valueEndIndex).trim();
             if (numStr.isEmpty() || numStr.equals("-") || numStr.equals(".")) {
-                if (PARSER_DEBUG)
-                    System.out.println("DEBUG: Empty number string for key '" + key + "'.");
+                ColorfulStatusPrinter.printDebug(verboseMode, "-> Empty number string for '" + key + "'.");
                 return -1.0;
             }
             double value = Double.parseDouble(numStr);
-            if (PARSER_DEBUG)
-                System.out.println("DEBUG: Found value '" + value + "' for key '" + key + "'.");
+            ColorfulStatusPrinter.printDebug(verboseMode, "-> Found Dbl " + value + " for '" + key + "'.");
             return value;
         } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
-            System.err.println("Error parsing double for key '" + key + "' from substring '"
-                    + json.substring(valueStartIndex, Math.min(valueEndIndex, json.length())) + "': " + e.getMessage());
+            ColorfulStatusPrinter.printError("Parsing dbl for key '" + key + "' failed: " + e.getMessage());
             return -1.0;
         }
     }
@@ -341,8 +306,8 @@ public class Product {
             return true;
         if (o == null || getClass() != o.getClass())
             return false;
-        Product product = (Product) o;
-        return Objects.equals(productName, product.productName) && Objects.equals(productType, product.productType);
+        Product p = (Product) o;
+        return Objects.equals(productName, p.productName) && Objects.equals(productType, p.productType);
     }
 
     @Override
