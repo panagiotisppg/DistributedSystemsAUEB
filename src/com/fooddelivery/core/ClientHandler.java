@@ -1,11 +1,9 @@
 package com.fooddelivery.core;
 
-import com.fooddelivery.common.Product;
 import com.fooddelivery.common.Protocol;
 import java.io.*;
 import java.net.Socket;
 import java.net.SocketException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
