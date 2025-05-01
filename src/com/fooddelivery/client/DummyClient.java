@@ -1,3 +1,4 @@
+// File: src/com/fooddelivery/client/DummyClient.java
 package com.fooddelivery.client;
 
 import com.fooddelivery.common.Protocol;
@@ -5,6 +6,7 @@ import java.io.*;
 import java.net.*;
 import java.util.Scanner;
 
+// Simple Dummy Client CLI Application (for Deliverable A user interactions).
 public class DummyClient {
 
     private Socket socket;
@@ -14,11 +16,11 @@ public class DummyClient {
     private volatile boolean running = true;
     private Thread listenerThread;
 
-    // --- NEW: Shared object for synchronous responses ---
+    // Shared object for synchronous responses
     private final Object syncResponseLock = new Object();
     private String lastSyncResponse = null;
-    // ----------------------------------------------------
 
+    // Constructor
     public DummyClient(String masterHost, int masterPort) throws IOException {
         try {
             this.socket = new Socket();
@@ -27,7 +29,7 @@ public class DummyClient {
             this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             this.consoleScanner = new Scanner(System.in);
             System.out.println("Dummy Client connected to Master at " + masterHost + ":" + masterPort);
-            startListenerThread(); // Listener reads ALL messages
+            startListenerThread();
         } catch (IOException e) {
             System.err.println("Dummy Client Error: Could not connect: " + e.getMessage());
             throw e;
@@ -41,21 +43,16 @@ public class DummyClient {
                 String messageFromServer;
                 while (running && !Thread.currentThread().isInterrupted()
                         && (messageFromServer = in.readLine()) != null) {
-                    // --- Dispatch based on message type ---
                     if (messageFromServer.startsWith(Protocol.SEARCH_RESULT + Protocol.DELIMITER)) {
-                        // Handle async Search Result directly
                         System.out.println("\n[Search Result]: " + messageFromServer);
-                        System.out.print("Client > "); // Reprint prompt
-                    } else {
-                        // Assume it's a synchronous response (ACK, NACK, BUY_*, RATE_*, ERROR)
+                        System.out.print("Client > ");
+                    } else { // Assume sync reply
                         synchronized (syncResponseLock) {
-                            System.out.println("\n[Listener Received Sync]: " + messageFromServer); // Debug log
-                            lastSyncResponse = messageFromServer; // Store the response
-                            syncResponseLock.notifyAll(); // Notify the waiting command thread
+                            System.out.println("\n[Listener Received Sync]: " + messageFromServer);
+                            lastSyncResponse = messageFromServer;
+                            syncResponseLock.notifyAll();
                         }
-                        // Don't reprint prompt here, main thread will handle display
                     }
-                    // ---------------------------------------
                 }
             } catch (SocketException e) {
                 if (running)
@@ -66,11 +63,9 @@ public class DummyClient {
             } catch (Exception e) {
                 System.err.println("\n[Listener Error]: Unexpected error: " + e.getMessage());
                 e.printStackTrace();
-            } // Catch unexpected
-            finally {
+            } finally {
                 System.out.println("\n[Listener thread stopped]");
-                running = false; // Stop main loop if listener dies
-                // Ensure any waiting thread is woken up on error/closure
+                running = false;
                 synchronized (syncResponseLock) {
                     syncResponseLock.notifyAll();
                 }
@@ -106,12 +101,12 @@ public class DummyClient {
     // Prints menu
     private void printMenu() {
         System.out.println(
-                "\n--- Dummy Client Menu ---\n  search <lat> <lon> <radius> <cat|null> <stars|null> <price|null>\n  buy <store> <prod1:q1,prod2:q2>\n  rate <store> <1-5>\n  exit\n-------------------------");
+                "\n--- Dummy Client Menu ---\n  search <lat> <lon> <radius> <cat|null> <stars|null> <price|null>\n  buy <Store Name> <prod1:q1,prod2:q2>\n  rate <Store Name> <1-5>\n  exit\n-------------------------");
     }
 
     // Handles user command input, sends, and waits for SYNC replies
     private void handleCommand(String line) {
-        String[] parts = line.split(" ", 2);
+        String[] parts = line.split(" ", 2); // Split command from the rest
         String command = parts[0].toLowerCase();
         String args = (parts.length > 1) ? parts[1] : "";
         String messageToSend = null;
@@ -141,54 +136,45 @@ public class DummyClient {
         }
 
         if (messageToSend != null) {
-            // --- Clear previous sync response and send ---
             String response = null;
             synchronized (syncResponseLock) {
                 lastSyncResponse = null;
-            }
+            } // Clear previous response
             if (!sendMessage(messageToSend))
                 return; // Exit if send fails
-            // ---------------------------------------------
 
             if (expectSyncResponse) {
                 System.out.println("Waiting for synchronous response...");
-                long timeoutMillis = 15000; // 15 second timeout
+                long timeoutMillis = 15000;
                 long startTime = System.currentTimeMillis();
-
-                synchronized (syncResponseLock) {
-                    // Wait until listener notifies OR timeout
+                synchronized (syncResponseLock) { // Acquire lock
                     while (lastSyncResponse == null && (System.currentTimeMillis() - startTime) < timeoutMillis) {
                         try {
                             long waitTime = timeoutMillis - (System.currentTimeMillis() - startTime);
                             if (waitTime <= 0)
-                                break; // Timeout check
-                            syncResponseLock.wait(waitTime); // Wait on the lock
-                        } catch (InterruptedException e) {
+                                break;
+                            syncResponseLock.wait(waitTime);
+                        } // Wait on the lock
+                        catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
-                            System.err.println("[Error]: Interrupted while waiting for response.");
-                            return; // Exit command handling
+                            System.err.println("[Error]: Interrupted.");
+                            return;
                         }
                     }
-                    // After waiting/notify, check if response arrived
-                    response = lastSyncResponse; // Get response stored by listener
+                    response = lastSyncResponse; // Get response potentially set by listener
                 } // Release lock
-
-                // --- Process the response (or lack thereof) ---
                 if (response != null) {
                     System.out.println("[Sync Response]: " + response);
                 } else {
-                    System.err.println("[Error]: Timeout waiting for synchronous response from Master.");
-                    // Should we try to close connection here? Maybe not immediately.
+                    System.err.println("[Error]: Timeout waiting for synchronous response.");
                 }
-                // ----------------------------------------------
-
             } else {
                 System.out.println("Search request sent. Results will arrive asynchronously via listener.");
             }
         }
     }
 
-    // --- Message Preparation Methods (No Changes Needed) ---
+    // --- Message Preparation Methods ---
     private String prepareSearchMessage(String args) {
         String[] parts = args.split(" ");
         if (parts.length != 6) {
@@ -209,31 +195,62 @@ public class DummyClient {
         return Protocol.SEARCH + "|" + payload;
     }
 
+    // --- UPDATED: prepareBuyMessage ---
     private String prepareBuyMessage(String args) {
-        String[] parts = args.split(" ", 2);
-        if (parts.length != 2) {
-            System.out.println("Usage: buy <store> <prod1:q1,...>");
+        // Find the last argument that looks like a product list (contains ":")
+        String[] parts = args.split(" ");
+        if (parts.length < 2) { // Need at least store name and one product item
+            System.out.println("Usage: buy <Store Name> <prod1:q1,prod2:q2>");
             return null;
         }
-        String storeName = parts[0];
-        String productList = parts[1];
-        if (storeName.isEmpty() || productList.isEmpty() || !productList.contains(":")) {
-            System.out.println("Invalid format.");
+
+        int productListIndex = -1;
+        for (int i = parts.length - 1; i >= 1; i--) { // Start from end, look for colon
+            if (parts[i].contains(Protocol.PRODUCT_QTY_DELIMITER)) {
+                productListIndex = i;
+                break;
+            }
+        }
+
+        if (productListIndex == -1) { // No colon found in later args
+            System.out.println("Usage: buy <Store Name> <prod1:q1,prod2:q2> (Product list format invalid?)");
             return null;
         }
+
+        // Reconstruct store name (parts before product list)
+        StringBuilder storeNameBuilder = new StringBuilder();
+        for (int i = 0; i < productListIndex; i++) {
+            storeNameBuilder.append(parts[i]);
+            if (i < productListIndex - 1) {
+                storeNameBuilder.append(" "); // Add space back if needed
+            }
+        }
+        String storeName = storeNameBuilder.toString();
+
+        // Get product list (the last part containing ':')
+        String productList = parts[productListIndex];
+        // Basic validation
+        if (storeName.isEmpty() || productList.isEmpty()) {
+            System.out.println("Store name or product list cannot be empty.");
+            return null;
+        }
+
         return Protocol.BUY + "|" + storeName + "|" + productList;
     }
 
+    // --- UPDATED: prepareRateMessage ---
     private String prepareRateMessage(String args) {
+        // Assume rating is the VERY last word and must be a number 1-5
         String[] parts = args.split(" ");
-        if (parts.length != 2) {
-            System.out.println("Usage: rate <store> <1-5>");
+        if (parts.length < 2) {
+            System.out.println("Usage: rate <Store Name> <1-5>");
             return null;
         }
-        String storeName = parts[0];
-        String ratingStr = parts[1];
+
+        String ratingStr = parts[parts.length - 1]; // Get last part as potential rating
+        int rating;
         try {
-            int rating = Integer.parseInt(ratingStr);
+            rating = Integer.parseInt(ratingStr);
             if (rating < 1 || rating > 5) {
                 System.err.println("Rating 1-5.");
                 return null;
@@ -242,10 +259,22 @@ public class DummyClient {
             System.err.println("Rating not integer.");
             return null;
         }
+
+        // Reconstruct store name (everything before the last part)
+        StringBuilder storeNameBuilder = new StringBuilder();
+        for (int i = 0; i < parts.length - 1; i++) {
+            storeNameBuilder.append(parts[i]);
+            if (i < parts.length - 2) {
+                storeNameBuilder.append(" "); // Add space back
+            }
+        }
+        String storeName = storeNameBuilder.toString();
+
         if (storeName.isEmpty()) {
-            System.out.println("Name empty.");
+            System.out.println("Store name empty.");
             return null;
         }
+
         return Protocol.RATE + "|" + storeName + "|" + ratingStr;
     }
 
@@ -298,7 +327,7 @@ public class DummyClient {
     // Main method
     public static void main(String[] args) {
         if (args.length != 2) {
-            System.err.println("Usage: java com.fooddelivery.client.DummyClient <master-host> <master-client-port>");
+            System.err.println("Usage: java com.fooddelivery.client.DummyClient <host> <port>");
             System.exit(1);
         }
         String host = args[0];
