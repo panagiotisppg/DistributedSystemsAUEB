@@ -25,8 +25,7 @@ public class Store {
         System.out.println("Store Verbose Logging: " + (verboseMode ? "ON" : "OFF"));
     }
 
-    public Store(String storeName, double latitude, double longitude, String foodCategory, double stars, int noOfVotes,
-            String storeLogo) {
+    public Store(String storeName, double latitude, double longitude, String foodCategory, double stars, int noOfVotes, String storeLogo) {
         this.storeName = storeName;
         this.latitude = latitude;
         this.longitude = longitude;
